@@ -119,6 +119,11 @@ GAMBLING_GAME_NAMES = (
     "dice",
     "highlow",
     "roulette",
+    "crash",
+    "tower",
+    "wheel",
+    "ladder",
+    "scratch",
 )
 
 DEFAULT_GAME_WIN_CHANCES = {
@@ -143,6 +148,16 @@ GAME_ODDS_ALIASES = {
     "highlow": "highlow",
     "rr": "roulette",
     "roulette": "roulette",
+    "crash": "crash",
+    "rocket": "crash",
+    "tower": "tower",
+    "climb": "tower",
+    "wheel": "wheel",
+    "spin": "wheel",
+    "ladder": "ladder",
+    "chain": "ladder",
+    "scratch": "scratch",
+    "sc": "scratch",
 }
 
 def load_game_win_chances():
@@ -567,6 +582,103 @@ def chance_roll(game, bonus=0.0, user_id=None):
     if chance <= 0:
         return False
     return random.random() < (chance / 100.0)
+
+# ==============================================
+# 🎲 PAYOUT MATH FOR THE CASH-OUT GAMBLING GAMES
+# ==============================================
+# Every multiplier below is priced off BASELINE_WIN_CHANCE, never off the
+# chance the owner has configured. That keeps `uwu odds` and `uwu userodds`
+# working as economy controls: lowering a game's chance lowers the player's
+# real return without silently inflating the payout table to compensate.
+BASELINE_WIN_CHANCE = 40.0
+HOUSE_EDGE = 0.10
+# Average total return of a winning instant round, so a full round returns
+# (1 - HOUSE_EDGE) of the stake on average at the baseline chance.
+INSTANT_WIN_RETURN = (1.0 - HOUSE_EDGE) / (BASELINE_WIN_CHANCE / 100.0)
+
+def scaled_step_survival(base_survival, win_chance):
+    """Map a configured win chance onto one step's survival probability.
+
+    Anchored so 0% always busts, the baseline chance keeps the game's natural
+    survival rate, and 100% never busts.
+    """
+    chance = max(0.0, min(100.0, float(win_chance)))
+    if chance <= BASELINE_WIN_CHANCE:
+        return base_survival * (chance / BASELINE_WIN_CHANCE)
+    climb = (chance - BASELINE_WIN_CHANCE) / (100.0 - BASELINE_WIN_CHANCE)
+    return base_survival + (1.0 - base_survival) * climb
+
+def survive_step(game, base_survival, user_id=None):
+    """Roll one step of a cash-out game under the configured odds."""
+    survival = scaled_step_survival(
+        base_survival,
+        get_effective_game_win_chance(game, user_id),
+    )
+    if survival >= 1.0:
+        return True
+    if survival <= 0.0:
+        return False
+    return random.random() < survival
+
+def cashout_multiplier(base_survival, steps):
+    """Total return (stake included) after surviving `steps` steps."""
+    return (1.0 - HOUSE_EDGE) / (base_survival ** max(0, int(steps)))
+
+def balance_payout_table(entries, target_mean=INSTANT_WIN_RETURN):
+    """Retune a table's top prize so its weighted mean return hits the target."""
+    table = [[float(multiplier), float(weight)] for multiplier, weight in entries]
+    total_weight = sum(weight for _, weight in table)
+    top_index = max(range(len(table)), key=lambda index: table[index][0])
+    fixed_value = sum(
+        multiplier * weight
+        for index, (multiplier, weight) in enumerate(table)
+        if index != top_index
+    )
+    table[top_index][0] = round(
+        (target_mean * total_weight - fixed_value) / table[top_index][1],
+        2,
+    )
+    return tuple((multiplier, weight) for multiplier, weight in table)
+
+def draw_payout(table):
+    """Pick one multiplier from a weighted payout table."""
+    return random.choices(
+        [multiplier for multiplier, _ in table],
+        weights=[weight for _, weight in table],
+        k=1,
+    )[0]
+
+def table_mean_return(table):
+    return sum(
+        multiplier * weight for multiplier, weight in table
+    ) / sum(weight for _, weight in table)
+
+# Every gambling game shares one configurable win chance, so they must also
+# share one winning return — otherwise the cheapest game to win becomes a money
+# printer. WIN_PROFIT is what a flat win credits on top of a stake that was
+# never debited; INSTANT_WIN_RETURN is the same number for games that reserve
+# the stake up front.
+WIN_PROFIT = INSTANT_WIN_RETURN - 1.0
+# A natural 21 keeps its traditional 3:2 premium over a normal blackjack win.
+BLACKJACK_NATURAL_PROFIT = WIN_PROFIT * 1.5
+# Colorgame's two-match consolation, kept below a full win.
+COLORGAME_PAIR_RETURN = 1.5
+
+SLOT_SYMBOLS = ("🍒", "🍋", "🍊", "🍇", "7️⃣", "💎")
+# Total return per winning symbol; the top prize is retuned so the weighted
+# mean lands exactly on INSTANT_WIN_RETURN.
+SLOT_TABLE = balance_payout_table(
+    ((1.7, 20), (1.7, 20), (1.7, 20), (1.7, 20), (3.0, 13), (6.0, 7))
+)
+
+def draw_slot_symbol():
+    """Pick a winning reel symbol and its total return."""
+    index = random.choices(
+        range(len(SLOT_TABLE)),
+        weights=[weight for _, weight in SLOT_TABLE],
+        k=1,
+    )[0]
+    return SLOT_SYMBOLS[index], SLOT_TABLE[index][0]
 
 def blackjack_score(hand):
     total = sum(card[1] for card in hand)
@@ -5200,19 +5312,19 @@ class ColorGameView(discord.ui.View):
         slots = self.game["slots"]
         matching = slots.count(selected)
         if matching == 3:
-            multiplier = 3
-            # Bet is reserved (already deducted); payout returns the stake + profit.
-            payout = self.game["bet"] * multiplier + self.game["bet"]
+            # The bet is reserved, so the multiplier is a total return.
+            multiplier = INSTANT_WIN_RETURN
+            payout = int(self.game["bet"] * multiplier)
             outcome = (
                 f"Three {COLOR_CHOICES[selected]} **{selected.title()}** slots. "
-                f"Profit: **+{format_coins(self.game['bet'] * multiplier)} uwuncy**"
+                f"Profit: **+{format_coins(payout - self.game['bet'])} uwuncy**"
             )
         elif matching == 2:
-            multiplier = 2
-            payout = self.game["bet"] * multiplier + self.game["bet"]
+            multiplier = COLORGAME_PAIR_RETURN
+            payout = int(self.game["bet"] * multiplier)
             outcome = (
                 f"Two {COLOR_CHOICES[selected]} **{selected.title()}** slots. "
-                f"Profit: **+{format_coins(self.game['bet'] * multiplier)} uwuncy**"
+                f"Profit: **+{format_coins(payout - self.game['bet'])} uwuncy**"
             )
         else:
             multiplier = 0
@@ -5248,6 +5360,9 @@ class ColorGameView(discord.ui.View):
                 view=self,
             )
         self.stop()
+        await offer_double_or_nothing(
+            self.message, self.owner_id, "colorgame", total_payout
+        )
 
     async def on_timeout(self):
         if self.closed:
@@ -5269,9 +5384,16 @@ class ColorGameView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
+def mines_tile_survival(bombs, found):
+    """Natural chance the next tile is safe on a 4x4 board."""
+    remaining = 16 - found
+    if remaining <= 0:
+        return 0.0
+    return max(0.0, (remaining - bombs) / remaining)
+
 def mines_multiplier(bombs, found):
-    """Fair progressive multiplier for a 4x4 Mines board."""
-    multiplier = 1.0
+    """Progressive total return for a 4x4 Mines board, after the house edge."""
+    multiplier = 1.0 - HOUSE_EDGE
     safe_tiles = 16 - bombs
     for step in range(found):
         multiplier *= (16 - step) / (safe_tiles - step)
@@ -5372,21 +5494,27 @@ class MinesView(discord.ui.View):
                 ephemeral=True,
             )
 
-        # Apply the configured round odds to the first tile while preserving
-        # a normal-looking board for every later interaction.
-        if not self.game["revealed"]:
-            bombs = self.game["bomb_locations"]
-            if self.game["target_win"] and tile in bombs:
-                safe_replacements = [
-                    index for index in range(16)
-                    if index != tile and index not in bombs
-                ]
-                if safe_replacements:
-                    bombs.remove(tile)
-                    bombs.add(random.choice(safe_replacements))
-            elif not self.game["target_win"] and tile not in bombs:
-                bombs.remove(random.choice(tuple(bombs)))
-                bombs.add(tile)
+        # Every tile is rolled under the configured odds, then the board is
+        # rearranged to match, so the visible layout never contradicts the roll.
+        bombs = self.game["bomb_locations"]
+        survived = survive_step(
+            "mines",
+            mines_tile_survival(self.game["bombs"], len(self.game["revealed"])),
+            self.owner_id,
+        )
+        if survived and tile in bombs:
+            safe_replacements = [
+                index for index in range(16)
+                if index != tile
+                and index not in bombs
+                and index not in self.game["revealed"]
+            ]
+            if safe_replacements:
+                bombs.remove(tile)
+                bombs.add(random.choice(safe_replacements))
+        elif not survived and tile not in bombs:
+            bombs.remove(random.choice(tuple(bombs)))
+            bombs.add(tile)
 
         button = self.children[tile]
         if tile in self.game["bomb_locations"]:
@@ -5421,6 +5549,7 @@ class MinesView(discord.ui.View):
             payout = int(self.game["bet"] * multiplier)
             user = get_user(self.owner_id)
             total_payout, bonus, boosted = settle_win(user, payout)
+            finish_game(user, "mines", self.game["bet"], True, total_payout)
             save_data(DATA)
             self.disable_board(reveal_bombs=True)
             await interaction.response.edit_message(
@@ -5436,6 +5565,9 @@ class MinesView(discord.ui.View):
                 view=self,
             )
             self.stop()
+            await offer_double_or_nothing(
+                self.message, self.owner_id, "mines", total_payout
+            )
             return
 
         await interaction.response.edit_message(
@@ -5475,6 +5607,9 @@ class MinesView(discord.ui.View):
             view=self,
         )
         self.stop()
+        await offer_double_or_nothing(
+            self.message, self.owner_id, "mines", total_payout
+        )
 
     async def on_timeout(self):
         if self.closed:
@@ -6194,7 +6329,7 @@ async def cf(ctx, first: str, second: str):
     win = (side in ["h","heads"] and result == "heads") or (side in ["t","tails"] and result == "tails")
 
     if win:
-        total_payout, bonus, boosted = settle_win(user, bet)
+        total_payout, bonus, boosted = settle_win(user, int(bet * WIN_PROFIT))
         finish_game(user, "coinflip", bet, True, total_payout)
         msg = (
             f"**Coin flip result**\nThe coin landed on **{result.title()}**.\n"
@@ -6219,7 +6354,9 @@ async def cf(ctx, first: str, second: str):
     if protection_notice:
         msg += f"\n{protection_notice}"
     save_data(DATA)
-    await ctx.send(msg)
+    await send_with_double_or_nothing(
+        ctx, msg, "coinflip", total_payout if win else 0
+    )
 
 @bot.command(name="deposit", aliases=["dep"])
 async def deposit(ctx, amount: int):
@@ -6397,34 +6534,33 @@ async def slot(ctx, bet: int):
     if validation_error:
         return await ctx.send(f"❌ {validation_error}")
     begin_game(user, "slots", bet)
-    symbols = ["🍒", "🍋", "🍊", "🍇", "💎", "7️⃣"]
 
     protection_notice = shield_notice(user, bet)
     if chance_roll("slots", user_id=ctx.author.id):
-        winning_symbol = random.choice(symbols)
+        winning_symbol, win_return = draw_slot_symbol()
         final = [winning_symbol] * 3
     else:
-        final = random.sample(symbols, 3)
+        win_return = 0.0
+        final = random.sample(SLOT_SYMBOLS, 3)
     res = f"🎰 **RESULT** 🎰\n| {final[0]} | {final[1]} | {final[2]} |\n"
 
-    if final[0]==final[1]==final[2]:
-        payout = bet*(10 if final[0]=="💎" else 5 if final[0]=="7️⃣" else 3)
-        total_payout, bonus, boosted = settle_win(user, payout)
+    if win_return:
+        # The stake is never debited on a win, so only the profit is credited.
+        total_payout, bonus, boosted = settle_win(
+            user, int(bet * (win_return - 1.0))
+        )
         jackpot_amount = jackpot_payout(user, "slots", bet) if final[0] == "💎" else 0
         finish_game(user, "slots", bet, True, total_payout + jackpot_amount)
-        res += f"**Jackpot:** +{format_coins(total_payout)} uwuncy"
+        res += (
+            f"**Three {final[0]}** at `{win_return:g}x`: "
+            f"+{format_coins(total_payout)} uwuncy"
+        )
         if jackpot_amount:
             res += f"\n🎰 Global jackpot claimed: **+{format_coins(jackpot_amount)} uwuncy**"
         if boosted:
             res += f" (includes Lucky Potion bonus of +{format_coins(bonus)} uwuncy)"
-    elif final[0]==final[1] or final[1]==final[2]:
-        payout = bet*2
-        total_payout, bonus, boosted = settle_win(user, payout)
-        finish_game(user, "slots", bet, True, total_payout)
-        res += f"**Pair:** +{format_coins(total_payout)} uwuncy"
-        if boosted:
-            res += f" (includes Lucky Potion bonus of +{format_coins(bonus)} uwuncy)"
     else:
+        total_payout = 0
         loss_result = settle_loss(user, bet)
         finish_game(user, "slots", bet, False, loss_result["remaining_loss"])
         res += describe_loss(loss_result, bet, "No match")
@@ -6432,7 +6568,7 @@ async def slot(ctx, bet: int):
     if protection_notice:
         res += f"\n{protection_notice}"
     save_data(DATA)
-    await ctx.send(res)
+    await send_with_double_or_nothing(ctx, res, "slots", total_payout)
 
 @bot.command(name="leaderboard", aliases=["lb", "top"])
 async def leaderboard(ctx, category: str = None):
@@ -6716,9 +6852,11 @@ async def blackjack(ctx, bet_text: str):
     player_initial, dealer_initial, player, dealer = build_blackjack_round(target_win)
 
     p, d = blackjack_score(player), blackjack_score(dealer)
+    total_payout = 0
     if p == 21 and len(player) == 2 and not (d == 21 and len(dealer) == 2):
-        payout = int(bet * 1.5)
-        total_payout, bonus, boosted = settle_win(user, payout)
+        total_payout, bonus, boosted = settle_win(
+            user, int(bet * BLACKJACK_NATURAL_PROFIT)
+        )
         finish_game(user, "blackjack", bet, True, total_payout)
         result = f"Blackjack. Profit: **+{format_coins(total_payout)} uwuncy**"
         if boosted:
@@ -6728,7 +6866,7 @@ async def blackjack(ctx, bet_text: str):
         finish_game(user, "blackjack", bet, False, loss_result["remaining_loss"])
         result = describe_loss(loss_result, bet, "Bust")
     elif d > 21 or p > d:
-        total_payout, bonus, boosted = settle_win(user, bet)
+        total_payout, bonus, boosted = settle_win(user, int(bet * WIN_PROFIT))
         finish_game(user, "blackjack", bet, True, total_payout)
         result = f"Win. Profit: **+{format_coins(total_payout)} uwuncy**"
         if boosted:
@@ -6742,12 +6880,15 @@ async def blackjack(ctx, bet_text: str):
         result = describe_loss(loss_result, bet)
 
     save_data(DATA)
-    await ctx.send(
+    await send_with_double_or_nothing(
+        ctx,
         f"**Blackjack — Final**\n"
         f"Your hand: {show(player)} → **{p}**\n"
         f"Dealer: {show(dealer)} → **{d}**\n"
         f"{result}\n"
-        f"Wallet: `{format_coins(user['wallet'])}` uwuncy"
+        f"Wallet: `{format_coins(user['wallet'])}` uwuncy",
+        "blackjack",
+        total_payout,
     )
 
 @bot.command(name="colorgame", aliases=["cg"])
@@ -6818,7 +6959,6 @@ async def mines(ctx, bombs: int, bet_text: str):
         "bombs": bombs,
         "revealed": set(),
         "bomb_locations": set(random.sample(range(16), bombs)),
-        "target_win": chance_roll("mines", user_id=ctx.author.id),
         "shield_notice": shield_notice(user, bet),
     }
     view = MinesView(ctx.author.id, game)
@@ -6841,13 +6981,13 @@ async def dice(ctx, bet: int, guess: int):
     else:
         num = random.choice([value for value in range(1, 7) if value != guess])
     if num == guess:
-        payout = bet*6
-        total_payout, bonus, boosted = settle_win(user, payout)
+        total_payout, bonus, boosted = settle_win(user, int(bet * WIN_PROFIT))
         finish_game(user, "dice", bet, True, total_payout)
         res = f"Result: **{num}** — Win: **+{format_coins(total_payout)} uwuncy**"
         if boosted:
             res += f" (includes Lucky Potion bonus of +{format_coins(bonus)} uwuncy)"
     else:
+        total_payout = 0
         loss_result = settle_loss(user, bet)
         finish_game(user, "dice", bet, False, loss_result["remaining_loss"])
         res = f"Result: **{num}** — {describe_loss(loss_result, bet, 'Loss')}"
@@ -6855,7 +6995,7 @@ async def dice(ctx, bet: int, guess: int):
     if protection_notice:
         res += f"\n{protection_notice}"
     save_data(DATA)
-    await ctx.send(res)
+    await send_with_double_or_nothing(ctx, res, "dice", total_payout)
 
 @bot.command(name="highlow", aliases=["hl"])
 async def highlow(ctx, bet: int, pick: str):
@@ -6886,12 +7026,13 @@ async def highlow(ctx, bet: int, pick: str):
     )
 
     if (pick=="high" and num>50) or (pick=="low" and num<=50):
-        total_payout, bonus, boosted = settle_win(user, bet)
+        total_payout, bonus, boosted = settle_win(user, int(bet * WIN_PROFIT))
         finish_game(user, "highlow", bet, True, total_payout)
         res = f"Number: **{num}** — Win: **+{format_coins(total_payout)} uwuncy**"
         if boosted:
             res += f" (includes Lucky Potion bonus of +{format_coins(bonus)} uwuncy)"
     else:
+        total_payout = 0
         loss_result = settle_loss(user, bet)
         finish_game(user, "highlow", bet, False, loss_result["remaining_loss"])
         res = f"Number: **{num}** — {describe_loss(loss_result, bet, 'Loss')}"
@@ -6899,7 +7040,7 @@ async def highlow(ctx, bet: int, pick: str):
     if protection_notice:
         res += f"\n{protection_notice}"
     save_data(DATA)
-    await ctx.send(res)
+    await send_with_double_or_nothing(ctx, res, "highlow", total_payout)
 
 @bot.command(name="rr", aliases=["roulette"])
 async def rr(ctx, bet: int):
@@ -6911,13 +7052,13 @@ async def rr(ctx, bet: int):
     begin_game(user, "roulette", bet)
     protection_notice = shield_notice(user, bet)
     if chance_roll("roulette", user_id=ctx.author.id):
-        payout = bet*5
-        total_payout, bonus, boosted = settle_win(user, payout)
+        total_payout, bonus, boosted = settle_win(user, int(bet * WIN_PROFIT))
         finish_game(user, "roulette", bet, True, total_payout)
         res = f"Click. You survived. Profit: **+{format_coins(total_payout)} uwuncy**"
         if boosted:
             res += f" (includes Lucky Potion bonus of +{format_coins(bonus)} uwuncy)"
     else:
+        total_payout = 0
         loss_result = settle_loss(user, bet)
         finish_game(user, "roulette", bet, False, loss_result["remaining_loss"])
         res = describe_loss(loss_result, bet, "Bang. Loss")
@@ -6925,7 +7066,1401 @@ async def rr(ctx, bet: int):
     if protection_notice:
         res += f"\n{protection_notice}"
     save_data(DATA)
-    await ctx.send(res)
+    await send_with_double_or_nothing(ctx, res, "roulette", total_payout)
+
+# ==============================================
+# 🚀 CASH-OUT & INSTANT GAMBLING GAMES
+# ==============================================
+# All five games below reserve the stake up front (like Mines), so a payout
+# multiplier is always a *total* return: 2.00x on a 1,000 bet credits 2,000 and
+# nets +1,000. Every multiplier table is priced off BASELINE_WIN_CHANCE, which
+# is what keeps `uwu odds` and `uwu userodds` meaningful here.
+def settle_cashout_win(user_id, game, bet, total_return):
+    """Credit a reserved-stake win and report the payout breakdown."""
+    user = get_user(user_id)
+    total_payout, bonus, boosted = settle_win(user, int(bet * total_return))
+    finish_game(user, game, bet, True, total_payout)
+    save_data(DATA)
+    return total_payout, bonus, boosted
+
+def settle_cashout_loss(user_id, game, bet):
+    """Resolve a reserved-stake bust, honouring the Loss Shield."""
+    user = get_user(user_id)
+    loss_result = settle_loss(user, bet, bet_reserved=True)
+    finish_game(user, game, bet, False, loss_result["remaining_loss"])
+    save_data(DATA)
+    return loss_result
+
+def payout_line(total_payout, bonus, boosted):
+    line = f"Payout: **+{format_coins(total_payout)} uwuncy**"
+    if boosted:
+        line += (
+            f" (includes Lucky Potion bonus of +{format_coins(bonus)} uwuncy)"
+        )
+    return line
+
+def claim_round_jackpot(user_id, game, bet):
+    """Award the global jackpot for a perfect run and describe it."""
+    amount = jackpot_payout(get_user(user_id), game, bet)
+    save_data(DATA)
+    if not amount:
+        return ""
+    return f"\n🎰 Global jackpot claimed: **+{format_coins(amount)} uwuncy**"
+
+def refund_reserved_bet(user_id, bet):
+    """Return a reserved stake when a board expires unfinished."""
+    credit_wallet(get_user(user_id), bet)
+    save_data(DATA)
+
+def resolve_gambling_bet(ctx, bet_text, game, usage):
+    """Parse and validate a wager, returning the amount or an error message."""
+    bet = parse_coins(bet_text)
+    if bet is None:
+        return None, f"❌ Invalid bet. Example: `{usage}`."
+    validation_error = validate_bet(get_user(ctx.author.id), bet, game)
+    if validation_error:
+        return None, f"❌ {validation_error}"
+    return bet, None
+
+# ---------- 🚀 CRASH ----------
+CRASH_BASE_SURVIVAL = 0.85
+CRASH_MAX_TICKS = 20
+CRASH_TICK_SECONDS = 1.4
+CRASH_GRAPH_WIDTH = 16
+CRASH_GRAPH_HEIGHT = 7
+
+def crash_return(tick):
+    """Total return offered after `tick` surviving ticks."""
+    return max(1.0, cashout_multiplier(CRASH_BASE_SURVIVAL, tick))
+
+def crash_graph(tick, crashed=False):
+    """A rocket trail climbing an exponential curve as the round survives."""
+    reached = max(
+        1,
+        min(
+            CRASH_GRAPH_WIDTH,
+            int(tick / CRASH_MAX_TICKS * CRASH_GRAPH_WIDTH) + 1,
+        ),
+    )
+    rows = []
+    for row in range(CRASH_GRAPH_HEIGHT):
+        line = []
+        for col in range(CRASH_GRAPH_WIDTH):
+            level = int(
+                ((col / (CRASH_GRAPH_WIDTH - 1)) ** 1.8)
+                * (CRASH_GRAPH_HEIGHT - 1)
+            )
+            if level != CRASH_GRAPH_HEIGHT - 1 - row or col >= reached:
+                line.append(" ")
+            elif col == reached - 1:
+                line.append("X" if crashed else "/")
+            else:
+                line.append(".")
+        rows.append("|" + "".join(line) + "|")
+    rows.append("+" + "-" * CRASH_GRAPH_WIDTH + "+")
+    return "```\n" + "\n".join(rows) + "\n```"
+
+def crash_embed(game, status=None, color=None):
+    multiplier = crash_return(game["tick"])
+    embed = discord.Embed(
+        title="🚀 CRASH",
+        description=(
+            crash_graph(game["tick"], crashed=game.get("crashed", False))
+            + f"\n# {multiplier:.2f}x"
+        ),
+        color=color or discord.Color.orange(),
+    )
+    embed.add_field(name="Player", value=game["player_name"], inline=True)
+    embed.add_field(
+        name="Bet",
+        value=f"`{format_coins(game['bet'])} uwuncy`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Cash out now",
+        value=f"`{format_coins(int(game['bet'] * multiplier))} uwuncy`",
+        inline=True,
+    )
+    if game.get("auto_cashout"):
+        embed.add_field(
+            name="Auto cash out",
+            value=f"`{game['auto_cashout']:.2f}x`",
+            inline=True,
+        )
+    if game.get("shield_notice"):
+        embed.add_field(
+            name="Loss Shield", value=game["shield_notice"], inline=False
+        )
+    if status:
+        embed.add_field(name="Status", value=status, inline=False)
+    embed.set_footer(
+        text=f"Tick {game['tick']}/{CRASH_MAX_TICKS} • "
+        f"Max {crash_return(CRASH_MAX_TICKS):.2f}x"
+    )
+    return embed
+
+class CrashView(discord.ui.View):
+    """A live Crash round whose multiplier climbs until the player bails out."""
+
+    def __init__(self, owner_id, game):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+        self.game = game
+        self.message = None
+        self.closed = False
+        self.cashout_button = discord.ui.Button(
+            label="💰 Cash Out",
+            style=discord.ButtonStyle.success,
+        )
+        self.cashout_button.callback = self.cash_out
+        self.add_item(self.cashout_button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is not your Crash round.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def run(self):
+        """Tick the multiplier until the round busts, tops out, or is banked."""
+        while not self.closed and self.game["tick"] < CRASH_MAX_TICKS:
+            await asyncio.sleep(CRASH_TICK_SECONDS)
+            if self.closed:
+                return
+            if not survive_step("crash", CRASH_BASE_SURVIVAL, self.owner_id):
+                return await self.bust()
+            self.game["tick"] += 1
+            target = self.game.get("auto_cashout")
+            if target and crash_return(self.game["tick"]) >= target:
+                return await self.pay_out(
+                    f"🤖 Auto cashed out at {target:.2f}x"
+                )
+            if self.game["tick"] >= CRASH_MAX_TICKS:
+                return await self.pay_out("🏁 Rode it to the top", jackpot=True)
+            await self.refresh()
+
+    async def refresh(self):
+        if not self.message:
+            return
+        try:
+            await self.message.edit(embed=crash_embed(self.game), view=self)
+        except discord.HTTPException:
+            pass
+
+    async def render(self, status, color):
+        if not self.message:
+            return
+        try:
+            await self.message.edit(
+                embed=crash_embed(self.game, status, color), view=self
+            )
+        except discord.HTTPException:
+            pass
+
+    async def bust(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.game["crashed"] = True
+        self.cashout_button.disabled = True
+        loss_result = settle_cashout_loss(self.owner_id, "crash", self.game["bet"])
+        await self.render(
+            describe_loss(loss_result, self.game["bet"], "💥 Crashed"),
+            discord.Color.red(),
+        )
+        self.stop()
+
+    async def pay_out(self, label, jackpot=False):
+        self.closed = True
+        self.cashout_button.disabled = True
+        bet = self.game["bet"]
+        multiplier = crash_return(self.game["tick"])
+        total_payout, bonus, boosted = settle_cashout_win(
+            self.owner_id, "crash", bet, multiplier
+        )
+        status = (
+            f"{label} at **{multiplier:.2f}x**.\n"
+            f"{payout_line(total_payout, bonus, boosted)}"
+        )
+        if jackpot:
+            status += claim_round_jackpot(self.owner_id, "crash", bet)
+        await self.render(status, discord.Color.green())
+        self.stop()
+        await offer_double_or_nothing(
+            self.message, self.owner_id, "crash", total_payout
+        )
+
+    async def cash_out(self, interaction):
+        if self.closed:
+            return await interaction.response.send_message(
+                "This Crash round is already finished.", ephemeral=True
+            )
+        if self.game["tick"] < 1:
+            return await interaction.response.send_message(
+                "Wait for the first tick before cashing out.", ephemeral=True
+            )
+        self.closed = True
+        await interaction.response.defer()
+        await self.pay_out("💰 Cashed out")
+
+@bot.command(name="crash", aliases=["rocket"])
+async def crash(ctx, bet_text: str = None, auto_cashout: str = None):
+    """Ride a rising multiplier and cash out before the rocket crashes."""
+    if bet_text is None:
+        return await ctx.send(
+            "Use `uwu crash <bet>` or `uwu crash <bet> <auto-cashout>` — "
+            "example: `uwu crash 50,000 2.5`."
+        )
+    bet, error = resolve_gambling_bet(ctx, bet_text, "crash", "uwu crash 50,000")
+    if error:
+        return await ctx.send(error)
+
+    target = None
+    if auto_cashout is not None:
+        try:
+            target = float(str(auto_cashout).casefold().replace("x", ""))
+        except ValueError:
+            return await ctx.send(
+                "❌ Auto cash out must be a multiplier, for example `2.5`."
+            )
+        if target <= 1.0:
+            return await ctx.send("❌ Auto cash out must be above `1.00x`.")
+
+    user = get_user(ctx.author.id)
+    game = {
+        "player_name": ctx.author.display_name,
+        "bet": bet,
+        "tick": 0,
+        "auto_cashout": target,
+        "shield_notice": shield_notice(user, bet),
+    }
+    begin_game(user, "crash", bet, reserve_bet=True)
+    save_data(DATA)
+    view = CrashView(ctx.author.id, game)
+    view.message = await ctx.send(
+        embed=crash_embed(game, "Lift off…"), view=view
+    )
+    await view.run()
+
+# ---------- 🏯 TOWER ----------
+TOWER_FLOORS = 8
+TOWER_MODES = {
+    "easy": {"label": "Easy", "doors": 4},
+    "normal": {"label": "Normal", "doors": 3},
+    "hard": {"label": "Hard", "doors": 2},
+}
+TOWER_MODE_ALIASES = {
+    "easy": "easy",
+    "e": "easy",
+    "normal": "normal",
+    "n": "normal",
+    "medium": "normal",
+    "mid": "normal",
+    "hard": "hard",
+    "h": "hard",
+    "insane": "hard",
+}
+
+def tower_survival(mode):
+    doors = TOWER_MODES[mode]["doors"]
+    return (doors - 1) / doors
+
+def tower_return(mode, floors_cleared):
+    return cashout_multiplier(tower_survival(mode), floors_cleared)
+
+def tower_embed(game, status=None, color=None):
+    doors = TOWER_MODES[game["mode"]]["doors"]
+    cleared = game["floor"]
+    lines = []
+    for floor in range(TOWER_FLOORS, 0, -1):
+        marker = "▫️"
+        row = " ".join("⬛" for _ in range(doors))
+        if game.get("trap_floor") == floor:
+            marker = "💥"
+            row = " ".join(
+                "💀" if index == game["trap_door"] else "⬜"
+                for index in range(doors)
+            )
+        elif floor <= cleared:
+            marker = "✅"
+            row = " ".join(
+                "🟩" if index == game["path"].get(floor) else "⬜"
+                for index in range(doors)
+            )
+        elif floor == cleared + 1 and not game.get("over"):
+            marker = "➡️"
+            row = " ".join("🚪" for _ in range(doors))
+        lines.append(f"{marker} `{tower_return(game['mode'], floor):7.2f}x` {row}")
+
+    embed = discord.Embed(
+        title="🏯 TOWER",
+        description="\n".join(lines),
+        color=color or discord.Color.blurple(),
+    )
+    embed.add_field(name="Player", value=game["player_name"], inline=True)
+    embed.add_field(
+        name="Bet", value=f"`{format_coins(game['bet'])} uwuncy`", inline=True
+    )
+    embed.add_field(
+        name="Difficulty",
+        value=f"{TOWER_MODES[game['mode']]['label']} • {doors} doors",
+        inline=True,
+    )
+    banked = tower_return(game["mode"], cleared) if cleared else 0.0
+    embed.add_field(
+        name="Banked",
+        value=(
+            f"`{banked:.2f}x` ({format_coins(int(game['bet'] * banked))} uwuncy)"
+            if cleared
+            else "`—`"
+        ),
+        inline=True,
+    )
+    if cleared < TOWER_FLOORS and not game.get("over"):
+        step = tower_return(game["mode"], cleared + 1)
+        embed.add_field(
+            name="Next floor",
+            value=f"`{step:.2f}x` ({format_coins(int(game['bet'] * step))} uwuncy)",
+            inline=True,
+        )
+    if game.get("shield_notice"):
+        embed.add_field(
+            name="Loss Shield", value=game["shield_notice"], inline=False
+        )
+    if status:
+        embed.add_field(name="Status", value=status, inline=False)
+    embed.set_footer(text="Pick a door to climb • Cash out whenever you like")
+    return embed
+
+class TowerView(discord.ui.View):
+    """An eight-floor climb where one door on every floor ends the run."""
+
+    def __init__(self, owner_id, game):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.game = game
+        self.message = None
+        self.closed = False
+
+        for index in range(TOWER_MODES[game["mode"]]["doors"]):
+            button = discord.ui.Button(
+                label=f"Door {index + 1}",
+                style=discord.ButtonStyle.primary,
+                row=0,
+            )
+
+            async def door_callback(interaction, door=index):
+                await self.open_door(interaction, door)
+
+            button.callback = door_callback
+            self.add_item(button)
+
+        self.cashout_button = discord.ui.Button(
+            label="💰 Cash Out",
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=True,
+        )
+        self.cashout_button.callback = self.cash_out
+        self.add_item(self.cashout_button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is not your Tower run.", ephemeral=True
+            )
+            return False
+        if self.closed:
+            await interaction.response.send_message(
+                "This Tower run is already finished.", ephemeral=True
+            )
+            return False
+        return True
+
+    def disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def open_door(self, interaction, door):
+        mode = self.game["mode"]
+        if not survive_step("tower", tower_survival(mode), self.owner_id):
+            self.closed = True
+            self.game["over"] = True
+            self.game["trap_floor"] = self.game["floor"] + 1
+            self.game["trap_door"] = door
+            self.disable_all()
+            loss_result = settle_cashout_loss(
+                self.owner_id, "tower", self.game["bet"]
+            )
+            await interaction.response.edit_message(
+                embed=tower_embed(
+                    self.game,
+                    describe_loss(
+                        loss_result,
+                        self.game["bet"],
+                        f"💀 Door {door + 1} was the trap",
+                    ),
+                    discord.Color.red(),
+                ),
+                view=self,
+            )
+            self.stop()
+            return
+
+        self.game["floor"] += 1
+        self.game["path"][self.game["floor"]] = door
+        self.cashout_button.disabled = False
+        if self.game["floor"] >= TOWER_FLOORS:
+            return await self.pay_out(interaction, "🏆 Tower cleared", jackpot=True)
+
+        multiplier = tower_return(mode, self.game["floor"])
+        await interaction.response.edit_message(
+            embed=tower_embed(
+                self.game,
+                f"Safe. Floor {self.game['floor']} cleared — "
+                f"**{multiplier:.2f}x** banked. Climb or cash out.",
+            ),
+            view=self,
+        )
+
+    async def pay_out(self, interaction, label, jackpot=False):
+        self.closed = True
+        self.game["over"] = True
+        self.disable_all()
+        bet = self.game["bet"]
+        multiplier = tower_return(self.game["mode"], self.game["floor"])
+        total_payout, bonus, boosted = settle_cashout_win(
+            self.owner_id, "tower", bet, multiplier
+        )
+        status = (
+            f"{label} at **{multiplier:.2f}x**.\n"
+            f"{payout_line(total_payout, bonus, boosted)}"
+        )
+        if jackpot:
+            status += claim_round_jackpot(self.owner_id, "tower", bet)
+        await interaction.response.edit_message(
+            embed=tower_embed(self.game, status, discord.Color.green()),
+            view=self,
+        )
+        self.stop()
+        await offer_double_or_nothing(
+            self.message, self.owner_id, "tower", total_payout
+        )
+
+    async def cash_out(self, interaction):
+        if self.game["floor"] < 1:
+            return await interaction.response.send_message(
+                "Clear at least one floor before cashing out.", ephemeral=True
+            )
+        await self.pay_out(interaction, "💰 Cashed out")
+
+    async def on_timeout(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.game["over"] = True
+        self.disable_all()
+        refund_reserved_bet(self.owner_id, self.game["bet"])
+        if self.message:
+            try:
+                await self.message.edit(
+                    embed=tower_embed(
+                        self.game, "Run expired. Your bet was returned."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+@bot.command(name="tower", aliases=["climb"])
+async def tower(ctx, bet_text: str = None, mode: str = "normal"):
+    """Climb an eight-floor tower, dodging one trap door per floor."""
+    if bet_text is None:
+        return await ctx.send(
+            "Use `uwu tower <bet> [easy|normal|hard]` — "
+            "example: `uwu tower 50,000 hard`."
+        )
+    normalized_mode = TOWER_MODE_ALIASES.get(str(mode).casefold())
+    if normalized_mode is None:
+        return await ctx.send("❌ Difficulty must be `easy`, `normal`, or `hard`.")
+    bet, error = resolve_gambling_bet(ctx, bet_text, "tower", "uwu tower 50,000")
+    if error:
+        return await ctx.send(error)
+
+    user = get_user(ctx.author.id)
+    game = {
+        "player_name": ctx.author.display_name,
+        "bet": bet,
+        "mode": normalized_mode,
+        "floor": 0,
+        "path": {},
+        "shield_notice": shield_notice(user, bet),
+    }
+    begin_game(user, "tower", bet, reserve_bet=True)
+    save_data(DATA)
+    view = TowerView(ctx.author.id, game)
+    view.message = await ctx.send(
+        embed=tower_embed(game, "Pick a door on floor 1."), view=view
+    )
+
+# ---------- 🎡 WHEEL ----------
+WHEEL_SLOTS = 8
+WHEEL_SPIN_STEPS = 11
+WHEEL_TIERS = {
+    "low": {
+        "label": "Low risk",
+        "table": balance_payout_table(
+            ((1.5, 55), (2.5, 33), (4.0, 10), (10.0, 2))
+        ),
+    },
+    "mid": {
+        "label": "Mid risk",
+        "table": balance_payout_table(
+            ((1.0, 60), (2.0, 25), (5.0, 12), (18.0, 3))
+        ),
+    },
+    "high": {
+        "label": "High risk",
+        "table": balance_payout_table(
+            ((1.0, 78), (2.0, 15), (8.0, 5), (38.0, 2))
+        ),
+    },
+}
+WHEEL_TIER_ALIASES = {
+    "low": "low",
+    "l": "low",
+    "safe": "low",
+    "mid": "mid",
+    "m": "mid",
+    "medium": "mid",
+    "normal": "mid",
+    "high": "high",
+    "h": "high",
+    "risky": "high",
+}
+
+def wheel_layout(tier, prize):
+    """Lay out the visible wheel so the pointer can land on a real result."""
+    table = WHEEL_TIERS[tier]["table"]
+    slots = [
+        None if index % 2 == 0 else draw_payout(table)
+        for index in range(WHEEL_SLOTS)
+    ]
+    candidates = [
+        index
+        for index in range(WHEEL_SLOTS)
+        if (slots[index] is None) == (prize is None)
+    ]
+    target = random.choice(candidates)
+    if prize is not None:
+        slots[target] = prize
+    return slots, target
+
+def wheel_strip(slots, pointer):
+    """Render the wheel with the pointer under the current segment."""
+    labels = "".join(
+        f"{('💀' if value is None else f'{value:g}x'):^7}" for value in slots
+    )
+    caret = "".join(
+        ("▲" if index == pointer else " ").center(7)
+        for index in range(len(slots))
+    )
+    return f"```\n{labels}\n{caret}\n```"
+
+def wheel_embed(game, status=None, color=None):
+    embed = discord.Embed(
+        title="🎡 WHEEL",
+        description=wheel_strip(game["slots"], game["pointer"]),
+        color=color or discord.Color.gold(),
+    )
+    embed.add_field(name="Player", value=game["player_name"], inline=True)
+    embed.add_field(
+        name="Bet", value=f"`{format_coins(game['bet'])} uwuncy`", inline=True
+    )
+    embed.add_field(
+        name="Risk", value=WHEEL_TIERS[game["tier"]]["label"], inline=True
+    )
+    top_prize = max(
+        multiplier for multiplier, _ in WHEEL_TIERS[game["tier"]]["table"]
+    )
+    embed.add_field(name="Top prize", value=f"`{top_prize:g}x`", inline=True)
+    if game.get("shield_notice"):
+        embed.add_field(
+            name="Loss Shield", value=game["shield_notice"], inline=False
+        )
+    if status:
+        embed.add_field(name="Status", value=status, inline=False)
+    embed.set_footer(text="Low, mid and high risk pay the same on average")
+    return embed
+
+@bot.command(name="wheel", aliases=["spin"])
+async def wheel(ctx, bet_text: str = None, tier: str = "mid"):
+    """Spin a segmented wheel for a multiplier, at the risk level you choose."""
+    if bet_text is None:
+        return await ctx.send(
+            "Use `uwu wheel <bet> [low|mid|high]` — example: `uwu wheel 50,000 high`."
+        )
+    normalized_tier = WHEEL_TIER_ALIASES.get(str(tier).casefold())
+    if normalized_tier is None:
+        return await ctx.send("❌ Risk must be `low`, `mid`, or `high`.")
+    bet, error = resolve_gambling_bet(ctx, bet_text, "wheel", "uwu wheel 50,000")
+    if error:
+        return await ctx.send(error)
+
+    user = get_user(ctx.author.id)
+    protection_notice = shield_notice(user, bet)
+    won = chance_roll("wheel", user_id=ctx.author.id)
+    prize = draw_payout(WHEEL_TIERS[normalized_tier]["table"]) if won else None
+    slots, target = wheel_layout(normalized_tier, prize)
+    game = {
+        "player_name": ctx.author.display_name,
+        "bet": bet,
+        "tier": normalized_tier,
+        "slots": slots,
+        "pointer": 0,
+        "shield_notice": protection_notice,
+    }
+    begin_game(user, "wheel", bet, reserve_bet=True)
+    save_data(DATA)
+
+    message = await ctx.send(embed=wheel_embed(game, "Spinning…"))
+    # Decelerate into the winning segment so the landing reads as a real spin.
+    total_steps = WHEEL_SPIN_STEPS + ((target - WHEEL_SPIN_STEPS) % WHEEL_SLOTS)
+    for step in range(1, total_steps + 1):
+        game["pointer"] = step % WHEEL_SLOTS
+        await asyncio.sleep(0.28 + 0.9 * (step / total_steps) ** 3)
+        try:
+            await message.edit(embed=wheel_embed(game, "Spinning…"))
+        except discord.HTTPException:
+            break
+    game["pointer"] = target
+
+    if prize is None:
+        loss_result = settle_cashout_loss(ctx.author.id, "wheel", bet)
+        status = describe_loss(loss_result, bet, "💀 Landed on a bust segment")
+        color = discord.Color.red()
+        total_payout = 0
+    else:
+        total_payout, bonus, boosted = settle_cashout_win(
+            ctx.author.id, "wheel", bet, prize
+        )
+        status = (
+            f"🎯 Landed on **{prize:g}x**.\n"
+            f"{payout_line(total_payout, bonus, boosted)}"
+        )
+        color = discord.Color.green()
+
+    try:
+        await message.edit(embed=wheel_embed(game, status, color))
+    except discord.HTTPException:
+        pass
+    await offer_double_or_nothing(message, ctx.author.id, "wheel", total_payout)
+
+# ---------- 🪜 LADDER ----------
+LADDER_BASE_SURVIVAL = 0.55
+LADDER_MAX_RUNGS = 10
+CARD_FACES = {1: "A", 11: "J", 12: "Q", 13: "K"}
+CARD_SUITS = ("♠", "♥", "♦", "♣")
+
+def card_face(rank):
+    return CARD_FACES.get(rank, str(rank))
+
+def ladder_return(rungs):
+    return cashout_multiplier(LADDER_BASE_SURVIVAL, rungs)
+
+def ladder_next_card(current, guess, survived):
+    """Draw the next card so the revealed rank matches the decided outcome."""
+    if guess == "higher":
+        winning = [rank for rank in range(1, 14) if rank > current]
+        losing = [rank for rank in range(1, 14) if rank <= current]
+    else:
+        winning = [rank for rank in range(1, 14) if rank < current]
+        losing = [rank for rank in range(1, 14) if rank >= current]
+    pool = winning if survived else losing
+    return random.choice(pool or losing or winning)
+
+def ladder_embed(game, status=None, color=None):
+    rungs = []
+    for rung in range(LADDER_MAX_RUNGS, 0, -1):
+        marker = "🟩" if rung <= game["rung"] else "⬜"
+        rungs.append(f"{marker} `{ladder_return(rung):8.2f}x`")
+    embed = discord.Embed(
+        title="🪜 LADDER",
+        description=(
+            f"## {game['suit']} {card_face(game['card'])}\n"
+            + "\n".join(rungs)
+        ),
+        color=color or discord.Color.teal(),
+    )
+    embed.add_field(name="Player", value=game["player_name"], inline=True)
+    embed.add_field(
+        name="Bet", value=f"`{format_coins(game['bet'])} uwuncy`", inline=True
+    )
+    embed.add_field(
+        name="Rung", value=f"`{game['rung']}/{LADDER_MAX_RUNGS}`", inline=True
+    )
+    banked = ladder_return(game["rung"]) if game["rung"] else 0.0
+    embed.add_field(
+        name="Banked",
+        value=(
+            f"`{banked:.2f}x` ({format_coins(int(game['bet'] * banked))} uwuncy)"
+            if game["rung"]
+            else "`—`"
+        ),
+        inline=True,
+    )
+    if game["rung"] < LADDER_MAX_RUNGS and not game.get("over"):
+        step = ladder_return(game["rung"] + 1)
+        embed.add_field(
+            name="Next rung",
+            value=f"`{step:.2f}x` ({format_coins(int(game['bet'] * step))} uwuncy)",
+            inline=True,
+        )
+    if game.get("shield_notice"):
+        embed.add_field(
+            name="Loss Shield", value=game["shield_notice"], inline=False
+        )
+    if status:
+        embed.add_field(name="Status", value=status, inline=False)
+    embed.set_footer(text="Higher or lower than the card shown • Aces are low")
+    return embed
+
+class LadderView(discord.ui.View):
+    """A high/low chain where every correct call compounds the multiplier."""
+
+    def __init__(self, owner_id, game):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.game = game
+        self.message = None
+        self.closed = False
+
+        self.higher_button = discord.ui.Button(
+            label="⬆️ Higher", style=discord.ButtonStyle.primary, row=0
+        )
+        self.higher_button.callback = self.guess_higher
+        self.add_item(self.higher_button)
+
+        self.lower_button = discord.ui.Button(
+            label="⬇️ Lower", style=discord.ButtonStyle.primary, row=0
+        )
+        self.lower_button.callback = self.guess_lower
+        self.add_item(self.lower_button)
+
+        self.cashout_button = discord.ui.Button(
+            label="💰 Cash Out",
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=True,
+        )
+        self.cashout_button.callback = self.cash_out
+        self.add_item(self.cashout_button)
+        self.sync_buttons()
+
+    def sync_buttons(self):
+        """A 13 can never go higher and an ace can never go lower."""
+        self.higher_button.disabled = self.game["card"] >= 13
+        self.lower_button.disabled = self.game["card"] <= 1
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is not your Ladder run.", ephemeral=True
+            )
+            return False
+        if self.closed:
+            await interaction.response.send_message(
+                "This Ladder run is already finished.", ephemeral=True
+            )
+            return False
+        return True
+
+    def disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def guess_higher(self, interaction):
+        await self.guess(interaction, "higher")
+
+    async def guess_lower(self, interaction):
+        await self.guess(interaction, "lower")
+
+    async def guess(self, interaction, direction):
+        survived = survive_step("ladder", LADDER_BASE_SURVIVAL, self.owner_id)
+        previous = self.game["card"]
+        self.game["card"] = ladder_next_card(previous, direction, survived)
+        self.game["suit"] = random.choice(CARD_SUITS)
+        reveal = (
+            f"{card_face(previous)} → **{self.game['suit']} "
+            f"{card_face(self.game['card'])}**"
+        )
+
+        if not survived:
+            self.closed = True
+            self.game["over"] = True
+            self.disable_all()
+            loss_result = settle_cashout_loss(
+                self.owner_id, "ladder", self.game["bet"]
+            )
+            await interaction.response.edit_message(
+                embed=ladder_embed(
+                    self.game,
+                    describe_loss(
+                        loss_result,
+                        self.game["bet"],
+                        f"❌ {reveal} — wrong call",
+                    ),
+                    discord.Color.red(),
+                ),
+                view=self,
+            )
+            self.stop()
+            return
+
+        self.game["rung"] += 1
+        self.cashout_button.disabled = False
+        if self.game["rung"] >= LADDER_MAX_RUNGS:
+            return await self.pay_out(
+                interaction, "🏆 Ladder cleared", jackpot=True
+            )
+
+        self.sync_buttons()
+        await interaction.response.edit_message(
+            embed=ladder_embed(
+                self.game,
+                f"✅ {reveal} — rung {self.game['rung']} banked at "
+                f"**{ladder_return(self.game['rung']):.2f}x**.",
+            ),
+            view=self,
+        )
+
+    async def pay_out(self, interaction, label, jackpot=False):
+        self.closed = True
+        self.game["over"] = True
+        self.disable_all()
+        bet = self.game["bet"]
+        multiplier = ladder_return(self.game["rung"])
+        total_payout, bonus, boosted = settle_cashout_win(
+            self.owner_id, "ladder", bet, multiplier
+        )
+        status = (
+            f"{label} at **{multiplier:.2f}x**.\n"
+            f"{payout_line(total_payout, bonus, boosted)}"
+        )
+        if jackpot:
+            status += claim_round_jackpot(self.owner_id, "ladder", bet)
+        await interaction.response.edit_message(
+            embed=ladder_embed(self.game, status, discord.Color.green()),
+            view=self,
+        )
+        self.stop()
+        await offer_double_or_nothing(
+            self.message, self.owner_id, "ladder", total_payout
+        )
+
+    async def cash_out(self, interaction):
+        if self.game["rung"] < 1:
+            return await interaction.response.send_message(
+                "Win at least one rung before cashing out.", ephemeral=True
+            )
+        await self.pay_out(interaction, "💰 Cashed out")
+
+    async def on_timeout(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.game["over"] = True
+        self.disable_all()
+        refund_reserved_bet(self.owner_id, self.game["bet"])
+        if self.message:
+            try:
+                await self.message.edit(
+                    embed=ladder_embed(
+                        self.game, "Run expired. Your bet was returned."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+@bot.command(name="ladder", aliases=["chain"])
+async def ladder(ctx, bet_text: str = None):
+    """Chain high/low calls for a compounding multiplier, cashing out any time."""
+    if bet_text is None:
+        return await ctx.send(
+            "Use `uwu ladder <bet>` — example: `uwu ladder 50,000`."
+        )
+    bet, error = resolve_gambling_bet(ctx, bet_text, "ladder", "uwu ladder 50,000")
+    if error:
+        return await ctx.send(error)
+
+    user = get_user(ctx.author.id)
+    game = {
+        "player_name": ctx.author.display_name,
+        "bet": bet,
+        "rung": 0,
+        "card": random.randint(2, 12),
+        "suit": random.choice(CARD_SUITS),
+        "shield_notice": shield_notice(user, bet),
+    }
+    begin_game(user, "ladder", bet, reserve_bet=True)
+    save_data(DATA)
+    view = LadderView(ctx.author.id, game)
+    view.message = await ctx.send(
+        embed=ladder_embed(game, "Higher or lower?"), view=view
+    )
+
+# ---------- 🎟️ SCRATCH ----------
+SCRATCH_TILES = 9
+SCRATCH_PICKS = 3
+SCRATCH_SYMBOLS = ("🍒", "🍀", "🔔", "7️⃣", "💎")
+SCRATCH_TABLE = balance_payout_table(
+    ((1.2, 50), (2.0, 28), (3.0, 14), (6.0, 6), (20.0, 2))
+)
+
+def draw_scratch_symbol():
+    """Pick a prize symbol and its multiplier from the weighted table."""
+    index = random.choices(
+        range(len(SCRATCH_TABLE)),
+        weights=[weight for _, weight in SCRATCH_TABLE],
+        k=1,
+    )[0]
+    return SCRATCH_SYMBOLS[index], SCRATCH_TABLE[index][0]
+
+def scratch_multiplier(symbol):
+    return SCRATCH_TABLE[SCRATCH_SYMBOLS.index(symbol)][0]
+
+def scratch_embed(game, status=None, color=None):
+    rows = []
+    for row in range(3):
+        cells = []
+        for column in range(3):
+            tile = row * 3 + column
+            cells.append(game["faces"].get(tile, "🎟️"))
+        rows.append(" ".join(cells))
+    prize_lines = " • ".join(
+        f"{symbol} `{multiplier:g}x`"
+        for symbol, (multiplier, _) in zip(SCRATCH_SYMBOLS, SCRATCH_TABLE)
+    )
+    embed = discord.Embed(
+        title="🎟️ SCRATCH",
+        description="\n".join(rows) + f"\n\n{prize_lines}",
+        color=color or discord.Color.purple(),
+    )
+    embed.add_field(name="Player", value=game["player_name"], inline=True)
+    embed.add_field(
+        name="Bet", value=f"`{format_coins(game['bet'])} uwuncy`", inline=True
+    )
+    embed.add_field(
+        name="Scratched",
+        value=f"`{len(game['picks'])}/{SCRATCH_PICKS}`",
+        inline=True,
+    )
+    if game.get("shield_notice"):
+        embed.add_field(
+            name="Loss Shield", value=game["shield_notice"], inline=False
+        )
+    if status:
+        embed.add_field(name="Status", value=status, inline=False)
+    embed.set_footer(text="Scratch three tiles • Match all three to win")
+    return embed
+
+class ScratchView(discord.ui.View):
+    """A nine-tile scratch card: three matching symbols pay the prize."""
+
+    def __init__(self, owner_id, game):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+        self.game = game
+        self.message = None
+        self.closed = False
+
+        for index in range(SCRATCH_TILES):
+            button = discord.ui.Button(
+                label="\u200b",
+                emoji="🎟️",
+                style=discord.ButtonStyle.secondary,
+                row=index // 3,
+            )
+
+            async def tile_callback(interaction, tile=index):
+                await self.scratch(interaction, tile)
+
+            button.callback = tile_callback
+            self.add_item(button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is not your scratch card.", ephemeral=True
+            )
+            return False
+        if self.closed:
+            await interaction.response.send_message(
+                "This scratch card is already finished.", ephemeral=True
+            )
+            return False
+        return True
+
+    def next_face(self):
+        """Choose the symbol under the next tile from the decided outcome."""
+        revealed = [self.game["faces"][tile] for tile in self.game["picks"]]
+        if self.game["target_win"]:
+            return self.game["prize_symbol"]
+        remaining = SCRATCH_PICKS - len(revealed)
+        if remaining > 1:
+            # Near misses are allowed while a losing card is still possible.
+            return random.choice(SCRATCH_SYMBOLS)
+        blocked = revealed[0] if len(set(revealed)) == 1 else None
+        return random.choice(
+            [symbol for symbol in SCRATCH_SYMBOLS if symbol != blocked]
+        )
+
+    def fill_remaining(self):
+        """Reveal the untouched tiles without showing a second winning line."""
+        counts = {}
+        for symbol in self.game["faces"].values():
+            counts[symbol] = counts.get(symbol, 0) + 1
+        for tile in range(SCRATCH_TILES):
+            if tile in self.game["faces"]:
+                continue
+            allowed = [
+                symbol
+                for symbol in SCRATCH_SYMBOLS
+                if counts.get(symbol, 0) < 2
+            ] or list(SCRATCH_SYMBOLS)
+            symbol = random.choice(allowed)
+            counts[symbol] = counts.get(symbol, 0) + 1
+            self.game["faces"][tile] = symbol
+        for tile, button in enumerate(self.children):
+            button.emoji = self.game["faces"][tile]
+            button.disabled = True
+
+    async def scratch(self, interaction, tile):
+        if tile in self.game["faces"]:
+            return await interaction.response.send_message(
+                "That tile is already scratched.", ephemeral=True
+            )
+        symbol = self.next_face()
+        self.game["faces"][tile] = symbol
+        self.game["picks"].append(tile)
+        button = self.children[tile]
+        button.emoji = symbol
+        button.disabled = True
+        button.style = discord.ButtonStyle.primary
+
+        if len(self.game["picks"]) < SCRATCH_PICKS:
+            revealed = [self.game["faces"][pick] for pick in self.game["picks"]]
+            teaser = (
+                f"{symbol} — two of a kind, one more to go!"
+                if len(set(revealed)) == 1 and len(revealed) == 2
+                else f"{symbol} — keep scratching."
+            )
+            return await interaction.response.edit_message(
+                embed=scratch_embed(self.game, teaser), view=self
+            )
+
+        self.closed = True
+        bet = self.game["bet"]
+        self.fill_remaining()
+        if self.game["target_win"]:
+            multiplier = scratch_multiplier(self.game["prize_symbol"])
+            total_payout, bonus, boosted = settle_cashout_win(
+                self.owner_id, "scratch", bet, multiplier
+            )
+            status = (
+                f"🎉 Three {self.game['prize_symbol']} — **{multiplier:g}x**.\n"
+                f"{payout_line(total_payout, bonus, boosted)}"
+            )
+            color = discord.Color.green()
+        else:
+            total_payout = 0
+            loss_result = settle_cashout_loss(self.owner_id, "scratch", bet)
+            status = describe_loss(loss_result, bet, "No match")
+            color = discord.Color.red()
+
+        await interaction.response.edit_message(
+            embed=scratch_embed(self.game, status, color), view=self
+        )
+        self.stop()
+        await offer_double_or_nothing(
+            self.message, self.owner_id, "scratch", total_payout
+        )
+
+    async def on_timeout(self):
+        if self.closed:
+            return
+        self.closed = True
+        for child in self.children:
+            child.disabled = True
+        refund_reserved_bet(self.owner_id, self.game["bet"])
+        if self.message:
+            try:
+                await self.message.edit(
+                    embed=scratch_embed(
+                        self.game, "Card expired. Your bet was returned."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+@bot.command(name="scratch", aliases=["sc"])
+async def scratch(ctx, bet_text: str = None):
+    """Scratch three of nine tiles and match them all to win the symbol prize."""
+    if bet_text is None:
+        return await ctx.send(
+            "Use `uwu scratch <bet>` — example: `uwu scratch 50,000`."
+        )
+    bet, error = resolve_gambling_bet(
+        ctx, bet_text, "scratch", "uwu scratch 50,000"
+    )
+    if error:
+        return await ctx.send(error)
+
+    user = get_user(ctx.author.id)
+    prize_symbol, _ = draw_scratch_symbol()
+    game = {
+        "player_name": ctx.author.display_name,
+        "bet": bet,
+        "faces": {},
+        "picks": [],
+        "prize_symbol": prize_symbol,
+        "target_win": chance_roll("scratch", user_id=ctx.author.id),
+        "shield_notice": shield_notice(user, bet),
+    }
+    begin_game(user, "scratch", bet, reserve_bet=True)
+    save_data(DATA)
+    view = ScratchView(ctx.author.id, game)
+    view.message = await ctx.send(
+        embed=scratch_embed(game, "Scratch any three tiles."), view=view
+    )
+
+# ---------- 🎲 DOUBLE OR NOTHING ----------
+# Offered on every gambling win. It reuses the source game's configured win
+# chance, so at the 40% baseline it is a 20% house edge and the strongest
+# uwuncy sink in the economy.
+DOUBLE_OR_NOTHING_MAX_CHAIN = 5
+DOUBLE_OR_NOTHING_TIMEOUT = 45
+
+def double_or_nothing_line(stake, chain):
+    return (
+        f"🎲 **Double or Nothing** — risk `{format_coins(stake)} uwuncy` "
+        f"for `{format_coins(stake * 2)}`. "
+        f"Chain {chain}/{DOUBLE_OR_NOTHING_MAX_CHAIN}."
+    )
+
+class DoubleOrNothingView(discord.ui.View):
+    """Risk a fresh payout for double, up to five times in a row."""
+
+    def __init__(self, owner_id, game_name, stake, chain=1):
+        super().__init__(timeout=DOUBLE_OR_NOTHING_TIMEOUT)
+        self.owner_id = owner_id
+        self.game_name = game_name
+        self.stake = int(stake)
+        self.chain = chain
+        self.message = None
+        self.closed = False
+
+        self.risk_button = discord.ui.Button(
+            label="🎲 Double or Nothing", style=discord.ButtonStyle.danger
+        )
+        self.risk_button.callback = self.risk
+        self.add_item(self.risk_button)
+
+        self.keep_button = discord.ui.Button(
+            label="🏦 Keep it", style=discord.ButtonStyle.secondary
+        )
+        self.keep_button.callback = self.keep
+        self.add_item(self.keep_button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is not your payout.", ephemeral=True
+            )
+            return False
+        if self.closed:
+            await interaction.response.send_message(
+                "This offer is already closed.", ephemeral=True
+            )
+            return False
+        return True
+
+    def disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def keep(self, interaction):
+        self.closed = True
+        self.disable_all()
+        await interaction.response.edit_message(
+            content=(
+                f"🏦 Kept **{format_coins(self.stake)} uwuncy**. Smart call."
+            ),
+            view=self,
+        )
+        self.stop()
+
+    async def risk(self, interaction):
+        self.closed = True
+        self.disable_all()
+        user = get_user(self.owner_id)
+        if not debit_wallet(user, self.stake):
+            await interaction.response.edit_message(
+                content="❌ That payout is already spent.", view=self
+            )
+            return self.stop()
+
+        begin_game(user, self.game_name, self.stake)
+        won = chance_roll(self.game_name, user_id=self.owner_id)
+        await interaction.response.edit_message(
+            content=f"🎲 Rolling for **{format_coins(self.stake * 2)} uwuncy**…",
+            view=self,
+        )
+        for face in ("🌀", "🎲", "✨"):
+            await asyncio.sleep(0.6)
+            try:
+                await interaction.edit_original_response(
+                    content=f"{face} Rolling for "
+                    f"**{format_coins(self.stake * 2)} uwuncy**…",
+                    view=self,
+                )
+            except discord.HTTPException:
+                break
+
+        if won:
+            reward = self.stake * 2
+            credit_wallet(user, reward)
+            finish_game(user, self.game_name, self.stake, True, reward)
+            save_data(DATA)
+            content = (
+                f"🎉 **Doubled!** Now holding "
+                f"**{format_coins(reward)} uwuncy**."
+            )
+            self.stop()
+            if self.chain < DOUBLE_OR_NOTHING_MAX_CHAIN:
+                follow_up = DoubleOrNothingView(
+                    self.owner_id, self.game_name, reward, self.chain + 1
+                )
+                content += (
+                    f"\n{double_or_nothing_line(reward, self.chain + 1)}"
+                )
+                try:
+                    await interaction.edit_original_response(
+                        content=content, view=follow_up
+                    )
+                    follow_up.message = await interaction.original_response()
+                except discord.HTTPException:
+                    pass
+                return
+        else:
+            finish_game(user, self.game_name, self.stake, False, self.stake)
+            save_data(DATA)
+            content = (
+                f"💀 **Gone.** Lost **{format_coins(self.stake)} uwuncy**."
+            )
+            self.stop()
+
+        try:
+            await interaction.edit_original_response(content=content, view=self)
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.disable_all()
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+async def offer_double_or_nothing(message, user_id, game, stake):
+    """Post a Double or Nothing offer under a payout, when there is one."""
+    stake = int(stake or 0)
+    if stake <= 0 or message is None:
+        return
+    view = DoubleOrNothingView(user_id, game, stake)
+    try:
+        view.message = await message.channel.send(
+            content=double_or_nothing_line(stake, 1), view=view
+        )
+    except discord.HTTPException:
+        pass
+
+# ==============================================
+# 📉 HOUSE EDGE REPORTING
+# ==============================================
+# `uwu odds` reports each game's real house edge at its current setting, so a
+# game can never quietly become a money printer again. "instant" games pay a
+# fixed return on a win; "steps" games pay a multiplier that compounds per
+# surviving step, and a player who is losing value per step stops at one.
+MINES_REFERENCE_BOMBS = 3
+GAME_ECONOMICS = {
+    "slots": {"kind": "instant", "table": SLOT_TABLE},
+    "coinflip": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "blackjack": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "colorgame": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "dice": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "highlow": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "roulette": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "wheel": {"kind": "instant", "win_return": INSTANT_WIN_RETURN},
+    "scratch": {"kind": "instant", "table": SCRATCH_TABLE},
+    "crash": {
+        "kind": "steps",
+        "survival": CRASH_BASE_SURVIVAL,
+        "max_steps": CRASH_MAX_TICKS,
+    },
+    "tower": {
+        "kind": "steps",
+        "survival": tower_survival("normal"),
+        "max_steps": TOWER_FLOORS,
+    },
+    "ladder": {
+        "kind": "steps",
+        "survival": LADDER_BASE_SURVIVAL,
+        "max_steps": LADDER_MAX_RUNGS,
+    },
+    "mines": {
+        "kind": "steps",
+        "survival": mines_tile_survival(MINES_REFERENCE_BOMBS, 0),
+        "max_steps": 16 - MINES_REFERENCE_BOMBS,
+    },
+}
+
+def game_house_edge(game, chance=None):
+    """The house's expected cut of one round at the configured win chance."""
+    spec = GAME_ECONOMICS.get(game)
+    if spec is None:
+        return None
+    win_chance = get_game_win_chance(game) if chance is None else float(chance)
+    if spec["kind"] == "instant":
+        win_return = spec.get("win_return") or table_mean_return(spec["table"])
+        return 1.0 - (win_chance / 100.0) * win_return
+    base_survival = spec["survival"]
+    if base_survival <= 0:
+        return 1.0
+    ratio = scaled_step_survival(base_survival, win_chance) / base_survival
+    # Below the baseline every extra step loses value, so the best a player can
+    # do is stop at one; above it, riding to the cap is best.
+    steps = 1 if ratio <= 1.0 else spec["max_steps"]
+    return 1.0 - (1.0 - HOUSE_EDGE) * (ratio ** steps)
+
+async def send_with_double_or_nothing(ctx, content, game, stake):
+    """Send a text result and attach the Double or Nothing offer to it."""
+    stake = int(stake or 0)
+    if stake <= 0:
+        return await ctx.send(content)
+    view = DoubleOrNothingView(ctx.author.id, game, stake)
+    view.message = await ctx.send(
+        content=f"{content}\n{double_or_nothing_line(stake, 1)}", view=view
+    )
+    return view.message
 
 @bot.command(name="8ball", aliases=["magic8"])
 async def eightball(ctx,*,q=None):
@@ -7847,6 +9382,13 @@ async def help_cmd(ctx):
 ┃ `{p}cf h <bet>` `{p}bj <bet>` `{p}cg <bet>` (choose color)
 ┃ `{p}cg r <bet>` (r/b/g/y) `{p}colorgame <color> <bet>`
 ┃ `{p}mines <bombs> <bet>` `{p}dice` `{p}hl` `{p}rr`
+┣ 🚀 Cash-out games — bank your multiplier before it collapses
+┃ `{p}crash <bet> [auto-cashout]` — the multiplier climbs every tick, cash out first
+┃ `{p}tower <bet> [easy|normal|hard]` — 8 floors, one trap door on each
+┃ `{p}ladder <bet>` — chain higher/lower calls, cash out any rung
+┃ `{p}wheel <bet> [low|mid|high]` — one spin, your pick of risk
+┃ `{p}scratch <bet>` — scratch 3 of 9 tiles and match them
+┃ Every win offers 🎲 Double or Nothing, up to 5 times in a row
 ┃ `{p}create arena <1-5> <total-per-player>` `{p}arena join/status/start/cancel <id>`
 ┃ `{p}paired @user [arena-id]` — protected teammates for 2v2–5v5
 ┃ Server owner: `{p}arena channel setup` • restore with `{p}channel redo`
@@ -8002,14 +9544,18 @@ async def odds(ctx, game: str = None, percent: str = None):
         return await ctx.send("Owner only.")
 
     if game is None:
-        lines = [
-            f"- `{name}`: **{get_game_win_chance(name):.1f}%**"
-            for name in DEFAULT_GAME_WIN_CHANCES
-        ]
+        lines = []
+        for name in DEFAULT_GAME_WIN_CHANCES:
+            edge = game_house_edge(name)
+            lines.append(
+                f"- `{name}`: **{get_game_win_chance(name):.1f}%** win"
+                + ("" if edge is None else f" • house edge `{edge:+.1%}`")
+            )
         return await ctx.send(
             "**Game win chances**\n"
             + "\n".join(lines)
-            + "\n\nUse `uwu odds <game> <percent>` or `uwu odds all <percent>`."
+            + "\n\nA positive house edge drains uwuncy; a negative one prints it."
+            + "\nUse `uwu odds <game> <percent>` or `uwu odds all <percent>`."
         )
 
     normalized_game = game.lower()
@@ -8027,9 +9573,11 @@ async def odds(ctx, game: str = None, percent: str = None):
     if percent is None:
         if len(target_games) == 1:
             game_name = target_games[0]
+            edge = game_house_edge(game_name)
             return await ctx.send(
                 f"**{game_name}** win chance: "
                 f"`{get_game_win_chance(game_name):.1f}%`"
+                + ("" if edge is None else f" • house edge `{edge:+.1%}`")
             )
         return await ctx.send(
             "Add a percentage, for example: `uwu odds all 40`."
