@@ -6832,7 +6832,7 @@ async def colorgame(ctx, first: str, bet_text: str = None):
         "bet": bet,
         "selection": None,
         "slots": ["❔", "❔", "❔"],
-        "target_win = chance_roll("color_game", user_id=ctx.author.id)"
+        "target_win": chance_roll("color_game", user_id=ctx.author.id),
         "shield_notice": shield_notice(user, bet),
     }
     view = ColorGameView(ctx.author.id, game)
