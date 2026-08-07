@@ -7208,6 +7208,7 @@ class CrashView(discord.ui.View):
         self.game = game
         self.message = None
         self.closed = False
+        self.settled = False
         self.cashout_button = discord.ui.Button(
             label="💰 Cash Out",
             style=discord.ButtonStyle.success,
@@ -7260,8 +7261,9 @@ class CrashView(discord.ui.View):
             pass
 
     async def bust(self):
-        if self.closed:
+        if self.settled:
             return
+        self.settled = True
         self.closed = True
         self.game["crashed"] = True
         self.cashout_button.disabled = True
@@ -7273,6 +7275,9 @@ class CrashView(discord.ui.View):
         self.stop()
 
     async def pay_out(self, label, jackpot=False):
+        if self.settled:
+            return
+        self.settled = True
         self.closed = True
         self.cashout_button.disabled = True
         bet = self.game["bet"]
