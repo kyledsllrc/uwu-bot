@@ -1,0 +1,7 @@
+discord.py
+flask
+firebase-admin
+google-cloud-firestore
+requests
+aiohttp
+python-dotenv
