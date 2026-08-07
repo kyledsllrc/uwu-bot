@@ -124,12 +124,16 @@ GAMBLING_GAME_NAMES = (
     "wheel",
     "ladder",
     "scratch",
+    "sabong",
 )
 
 DEFAULT_GAME_WIN_CHANCES = {
     game: 40.0
     for game in GAMBLING_GAME_NAMES
 }
+# Sabong is player-versus-player, so its chance is not a house win rate: it is
+# the chance the MERON rooster wins. 50% is an even fight.
+DEFAULT_GAME_WIN_CHANCES["sabong"] = 50.0
 
 GAME_ODDS_ALIASES = {
     "slot": "slots",
@@ -158,7 +162,17 @@ GAME_ODDS_ALIASES = {
     "chain": "ladder",
     "scratch": "scratch",
     "sc": "scratch",
+    "sabong": "sabong",
+    "cockfight": "sabong",
+    "tari": "sabong",
 }
+
+
+def game_odds_meaning(game):
+    """What a game's configured percentage actually controls."""
+    # Sabong is bet between players, so there is no house win rate to set --
+    # the percentage steers which rooster wins instead.
+    return "chance MERON wins" if game == "sabong" else "win chance"
 
 def load_game_win_chances():
     """Load developer-controlled win chances without losing safe defaults."""
@@ -8467,6 +8481,624 @@ async def send_with_double_or_nothing(ctx, content, game, stake):
     )
     return view.message
 
+# ==============================================
+# 🐓 SABONG — POOLED CROWD BETTING
+# ==============================================
+# Sabong is the only game here that is not played against the house. Everyone
+# stakes into a MERON or WALA pool and the winning side splits the losing side's
+# money, so a player's multiplier is decided by how lopsided the crowd is rather
+# than by a fixed payout table:
+#
+#     payout = your bet x (winning_pool + losing_pool x (1 - rake)) / winning_pool
+#
+# Betting the unpopular rooster is what pays. If nobody backs the loser there is
+# no money to share, so the winners simply get their stake back — the rake only
+# ever touches the losing pool, never a winner's own stake.
+SABONG_RAKE = 0.05
+SABONG_ODDS_NOTE = (
+    "ℹ️ `sabong` is player-versus-player, so its percentage is the chance "
+    "**MERON** wins, not a house win rate — `50` is an even fight, and the "
+    f"house only ever takes a {SABONG_RAKE:.0%} rake of the losing pool."
+)
+SABONG_LOBBY_SECONDS = 300
+SABONG_FIGHT_SECONDS = 180
+SABONG_FIGHT_TICKS = 30
+SABONG_ROOSTER_HP = 100
+SABONG_SIDES = ("meron", "wala")
+SABONG_SIDE_LABELS = {"meron": "MERON", "wala": "WALA"}
+SABONG_SIDE_EMOJI = {"meron": "🔴", "wala": "🔵"}
+SABONG_SIDE_ALIASES = {
+    "meron": "meron",
+    "m": "meron",
+    "red": "meron",
+    "wala": "wala",
+    "w": "wala",
+    "blue": "wala",
+}
+
+# One live match per channel, so two crowds can never bet into the same pool.
+SABONG_MATCHES = {}
+
+SABONG_ROOSTER_NAMES = (
+    "Bakunawa", "Haring Uwak", "Kidlat", "Bagyo", "Talim", "Asero",
+    "Dugong Bughaw", "Panday", "Lakay", "Sunog", "Buwaya", "Higante",
+    "Anino", "Tigre", "Bulkan", "Kamandag",
+)
+
+SABONG_STRIKES = (
+    "{a} launches off the ground and rakes {b} across the chest!",
+    "{a} lands a clean heel strike on {b}!",
+    "{a} drives {b} back toward the edge of the ring!",
+    "{a} slips under {b} and comes up slashing!",
+    "{a} catches {b} mid-air — feathers everywhere!",
+    "{a} pins {b} down and hammers with the beak!",
+    "{a} feints left and buries a spur into {b}!",
+    "{a} explodes out of the corner and floors {b}!",
+    "{a} counters and sends {b} tumbling!",
+    "{a} rips a low blow across {b}'s legs!",
+)
+SABONG_LULLS = (
+    "Both roosters circle, sizing each other up…",
+    "They lock eyes. The crowd goes quiet.",
+    "Hackles up on both sides — neither one blinks.",
+    "A tense stand-off in the middle of the ring.",
+    "They break apart, breathing hard.",
+)
+SABONG_CROWD = (
+    "🗣️ *MERON! MERON! MERON!*",
+    "🗣️ *WALA NAMAN! WALA!*",
+    "🗣️ The crowd is on its feet!",
+    "🗣️ Somebody just doubled down at ringside!",
+    "🗣️ *SUUUUGOD!*",
+)
+
+
+def sabong_side(text):
+    """Resolve a side name or alias, or None when it is not a side."""
+    return SABONG_SIDE_ALIASES.get(str(text or "").casefold())
+
+
+def sabong_pool(match, side):
+    return sum(bet["amount"] for bet in match["bets"].values() if bet["side"] == side)
+
+
+def sabong_multiplier(winning_pool, losing_pool):
+    """Total return per unit staked on the winning side."""
+    if winning_pool <= 0:
+        return 0.0
+    return (winning_pool + losing_pool * (1.0 - SABONG_RAKE)) / winning_pool
+
+
+def sabong_odds_board(match):
+    """Live payout preview for both sides, as the crowd's money stands."""
+    lines = []
+    for side in SABONG_SIDES:
+        pool = sabong_pool(match, side)
+        other = sabong_pool(match, SABONG_SIDES[1 - SABONG_SIDES.index(side)])
+        backers = sum(1 for bet in match["bets"].values() if bet["side"] == side)
+        if pool <= 0:
+            payout = "no bets yet"
+        else:
+            payout = f"pays **{sabong_multiplier(pool, other):.2f}x**"
+        lines.append(
+            f"{SABONG_SIDE_EMOJI[side]} **{SABONG_SIDE_LABELS[side]}** — "
+            f"`{format_coins(pool)}` uwuncy from **{backers}** "
+            f"{'bettor' if backers == 1 else 'bettors'} • {payout}"
+        )
+    return "\n".join(lines)
+
+
+def sabong_hp_bar(hp):
+    filled = max(0, min(10, round(hp / 10)))
+    return "█" * filled + "░" * (10 - filled)
+
+
+def sabong_lobby_embed(match, status=None):
+    total = sum(bet["amount"] for bet in match["bets"].values())
+    embed = discord.Embed(
+        title="🐓 SABONG — BET BET BET!",
+        description=(
+            status
+            or f"**{match['host_name']}** started a sabong!\n"
+            "Stake with `uwu sabong <amount>`, then pick your rooster below."
+        ),
+        color=discord.Color.orange(),
+    )
+    embed.add_field(name="Ringside money", value=sabong_odds_board(match), inline=False)
+    waiting = [bet for bet in match["bets"].values() if bet["side"] is None]
+    if waiting:
+        embed.add_field(
+            name="Staked, still choosing",
+            value=", ".join(bet["name"] for bet in waiting),
+            inline=False,
+        )
+    embed.add_field(
+        name="Total pot",
+        value=f"**{format_coins(total)} uwuncy**",
+        inline=False,
+    )
+    embed.set_footer(
+        text=(
+            f"{match['host_name']} runs `uwu sabong start` to begin • "
+            f"the losing pool is shared out minus a {SABONG_RAKE:.0%} rake"
+        )
+    )
+    return embed
+
+
+def sabong_fight_embed(match, headline, color=None):
+    embed = discord.Embed(
+        title="🐓 SABONG — LIVE",
+        description=headline,
+        color=color or discord.Color.red(),
+    )
+    for side in SABONG_SIDES:
+        hp = match["hp"][side]
+        embed.add_field(
+            name=(
+                f"{SABONG_SIDE_EMOJI[side]} {SABONG_SIDE_LABELS[side]} — "
+                f"{match['names'][side]}"
+            ),
+            value=f"`{sabong_hp_bar(hp)}` {max(0, int(hp))}/100",
+            inline=False,
+        )
+    embed.add_field(name="Ringside money", value=sabong_odds_board(match), inline=False)
+    if match["log"]:
+        embed.add_field(
+            name="Play by play",
+            value="\n".join(match["log"][-4:]),
+            inline=False,
+        )
+    return embed
+
+
+def build_sabong_script(winner):
+    """Damage per tick that always leaves `winner` standing at the end.
+
+    The outcome is rolled from the configured odds before the fight starts, so
+    the animation has to be scripted backwards from it rather than emerging
+    from the damage rolls.
+    """
+    loser = SABONG_SIDES[1 - SABONG_SIDES.index(winner)]
+    script = []
+    for tick in range(SABONG_FIGHT_TICKS):
+        progress = (tick + 1) / SABONG_FIGHT_TICKS
+        # The loser slips behind gradually so the crowd sees it coming, but the
+        # winner still takes real damage and can look in trouble early on.
+        if random.random() < 0.30 - 0.15 * progress:
+            attacker, defender = loser, winner
+        else:
+            attacker, defender = winner, loser
+        script.append((attacker, defender, random.randint(3, 11)))
+    return script, loser
+
+
+def resolve_sabong_winner(match):
+    """Pick the winning rooster, honouring per-user then global odds."""
+    # A per-user override is about one player's result, so it decides the whole
+    # match: the earliest such bettor's roll picks the side that wins.
+    for user_id, bet in match["bets"].items():
+        if bet["side"] is None:
+            continue
+        override = get_user_game_win_chance(user_id, "sabong")
+        if override is None:
+            continue
+        backed = bet["side"]
+        other = SABONG_SIDES[1 - SABONG_SIDES.index(backed)]
+        chance = max(0.0, min(100.0, override))
+        if chance >= 100:
+            return backed
+        if chance <= 0:
+            return other
+        return backed if random.random() < (chance / 100.0) else other
+    meron_chance = get_game_win_chance("sabong")
+    return "meron" if random.random() < (meron_chance / 100.0) else "wala"
+
+
+def settle_sabong(match, winner):
+    """Pay the winning pool and report each player's result."""
+    loser = SABONG_SIDES[1 - SABONG_SIDES.index(winner)]
+    winning_pool = sabong_pool(match, winner)
+    losing_pool = sabong_pool(match, loser)
+    multiplier = sabong_multiplier(winning_pool, losing_pool)
+    winners, losers = [], []
+
+    for user_id, bet in match["bets"].items():
+        if bet["side"] is None:
+            # Never chose a rooster, so the stake was never at risk.
+            refund_reserved_bet(user_id, bet["amount"])
+            continue
+        user = get_user(user_id)
+        if bet["side"] == winner:
+            payout = int(bet["amount"] * multiplier)
+            total_payout, bonus, boosted = settle_win(user, payout)
+            finish_game(user, "sabong", bet["amount"], True, total_payout)
+            winners.append((bet["name"], bet["amount"], total_payout, bonus, boosted))
+        else:
+            loss_result = settle_loss(user, bet["amount"], bet_reserved=True)
+            finish_game(user, "sabong", bet["amount"], False, loss_result["remaining_loss"])
+            losers.append((bet["name"], bet["amount"], loss_result))
+
+    jackpot_note = ""
+    if winning_pool <= 0 and losing_pool > 0:
+        # Nobody backed the winning rooster, so the whole pot seeds the jackpot
+        # instead of vanishing.
+        ECONOMY_SETTINGS["jackpot"] += losing_pool
+        save_economy_settings()
+        jackpot_note = (
+            f"\n🎰 Nobody backed {SABONG_SIDE_LABELS[winner]} — "
+            f"**{format_coins(losing_pool)} uwuncy** rolls into the global jackpot."
+        )
+
+    save_data(DATA)
+    return {
+        "winner": winner,
+        "multiplier": multiplier,
+        "winning_pool": winning_pool,
+        "losing_pool": losing_pool,
+        "winners": winners,
+        "losers": losers,
+        "jackpot_note": jackpot_note,
+    }
+
+
+def sabong_result_text(match, result):
+    winner = result["winner"]
+    lines = [
+        f"# {SABONG_SIDE_EMOJI[winner]} {SABONG_SIDE_LABELS[winner]} WINS!",
+        f"**{match['names'][winner]}** is left standing.",
+        "",
+        f"Pot: **{format_coins(result['winning_pool'] + result['losing_pool'])} uwuncy** • "
+        f"{SABONG_SIDE_LABELS[winner]} pays **{result['multiplier']:.2f}x**",
+    ]
+    if result["winners"]:
+        lines.append("")
+        lines.append("**💰 Winners**")
+        for name, amount, payout, bonus, boosted in result["winners"]:
+            entry = (
+                f"• {name} — staked `{format_coins(amount)}` → "
+                f"**+{format_coins(payout)} uwuncy**"
+            )
+            if boosted:
+                entry += f" (Lucky Potion +{format_coins(bonus)})"
+            lines.append(entry)
+    else:
+        lines.append("")
+        lines.append(f"**No one backed {SABONG_SIDE_LABELS[winner]}.**")
+    if result["losers"]:
+        lines.append("")
+        lines.append("**💸 Lost their stake**")
+        for name, amount, loss_result in result["losers"]:
+            entry = f"• {name} — `-{format_coins(loss_result['remaining_loss'])} uwuncy`"
+            if loss_result["shielded"]:
+                entry += (
+                    f" (Loss Shield returned "
+                    f"{format_coins(loss_result['protected_amount'])})"
+                )
+            lines.append(entry)
+    lines.append(result["jackpot_note"])
+    return "\n".join(line for line in lines if line is not None)
+
+
+class SabongLobbyView(discord.ui.View):
+    """MERON / WALA buttons that assign each staked player to a side."""
+
+    def __init__(self, match):
+        super().__init__(timeout=SABONG_LOBBY_SECONDS)
+        self.match = match
+        self.message = None
+        for side in SABONG_SIDES:
+            button = discord.ui.Button(
+                label=SABONG_SIDE_LABELS[side],
+                emoji=SABONG_SIDE_EMOJI[side],
+                style=(
+                    discord.ButtonStyle.danger
+                    if side == "meron"
+                    else discord.ButtonStyle.primary
+                ),
+            )
+            button.callback = self.make_pick(side)
+            self.add_item(button)
+
+    def make_pick(self, side):
+        async def pick(interaction):
+            if self.match["state"] != "betting":
+                return await interaction.response.send_message(
+                    "Betting is closed for this sabong.", ephemeral=True
+                )
+            bet = self.match["bets"].get(interaction.user.id)
+            if bet is None:
+                return await interaction.response.send_message(
+                    "Stake first with `uwu sabong <amount>`, then pick a rooster.",
+                    ephemeral=True,
+                )
+            if bet["side"] is not None:
+                return await interaction.response.send_message(
+                    f"You are already on **{SABONG_SIDE_LABELS[bet['side']]}** "
+                    f"for `{format_coins(bet['amount'])}` uwuncy.",
+                    ephemeral=True,
+                )
+            bet["side"] = side
+            await interaction.response.send_message(
+                f"{SABONG_SIDE_EMOJI[side]} You are on **{SABONG_SIDE_LABELS[side]}** "
+                f"for `{format_coins(bet['amount'])}` uwuncy.",
+                ephemeral=True,
+            )
+            await self.refresh()
+
+        return pick
+
+    async def refresh(self):
+        if not self.message:
+            return
+        try:
+            await self.message.edit(embed=sabong_lobby_embed(self.match), view=self)
+        except discord.HTTPException:
+            pass
+
+    async def close(self):
+        for child in self.children:
+            child.disabled = True
+        await self.refresh()
+        self.stop()
+
+    async def on_timeout(self):
+        if self.match["state"] != "betting":
+            return
+        await cancel_sabong(
+            self.match,
+            f"⌛ Nobody started the sabong within {SABONG_LOBBY_SECONDS // 60} minutes.",
+        )
+
+
+async def cancel_sabong(match, reason):
+    """Abandon a match and hand every staked player their money back."""
+    if match["state"] == "done":
+        return
+    match["state"] = "done"
+    SABONG_MATCHES.pop(match["channel_id"], None)
+    refunded = 0
+    for user_id, bet in match["bets"].items():
+        refund_reserved_bet(user_id, bet["amount"])
+        refunded += bet["amount"]
+    view = match.get("view")
+    if view:
+        await view.close()
+    note = (
+        f"\nRefunded **{format_coins(refunded)} uwuncy** to "
+        f"**{len(match['bets'])}** bettors."
+        if refunded
+        else ""
+    )
+    try:
+        await match["channel"].send(f"{reason}{note}")
+    except discord.HTTPException:
+        pass
+
+
+async def run_sabong_fight(match):
+    """Play the 3-minute fight out tick by tick, then pay everyone.
+
+    Settlement is wrapped so a mid-fight Discord failure can never leave the
+    crowd's stakes reserved or the channel stuck on a match that never ends.
+    """
+    winner = resolve_sabong_winner(match)
+    try:
+        await animate_sabong_fight(match, winner)
+    except Exception:
+        traceback.print_exc()
+    finally:
+        if match["state"] != "done":
+            match["state"] = "done"
+            SABONG_MATCHES.pop(match["channel_id"], None)
+            result = settle_sabong(match, winner)
+            try:
+                await match["channel"].send(sabong_result_text(match, result))
+            except discord.HTTPException:
+                pass
+
+
+async def animate_sabong_fight(match, winner):
+    """Edit one message tick by tick, then settle and announce the result."""
+    script, loser = build_sabong_script(winner)
+    match["hp"] = {side: SABONG_ROOSTER_HP for side in SABONG_SIDES}
+    match["log"] = []
+    interval = SABONG_FIGHT_SECONDS / SABONG_FIGHT_TICKS
+
+    message = await match["channel"].send(
+        embed=sabong_fight_embed(match, "🔔 **The referee releases them — FIGHT!**")
+    )
+
+    for tick, (attacker, defender, damage) in enumerate(script, start=1):
+        await asyncio.sleep(interval)
+        if tick == SABONG_FIGHT_TICKS:
+            match["hp"][loser] = 0
+            line = (
+                f"💀 **{match['names'][winner]}** puts "
+                f"**{match['names'][defender if defender != winner else loser]}** down!"
+            )
+        else:
+            # Keep the loser alive until the scripted finish so the ending lands
+            # on the rolled winner rather than on the damage rolls.
+            floor = 6 if defender == loser else 1
+            match["hp"][defender] = max(floor, match["hp"][defender] - damage)
+            if random.random() < 0.18:
+                line = random.choice(SABONG_LULLS)
+            else:
+                line = "⚔️ " + random.choice(SABONG_STRIKES).format(
+                    a=match["names"][attacker], b=match["names"][defender]
+                )
+        match["log"].append(line)
+        if tick % 6 == 0:
+            match["log"].append(random.choice(SABONG_CROWD))
+
+        remaining = int((SABONG_FIGHT_TICKS - tick) * interval)
+        headline = (
+            f"Round **{tick}** of {SABONG_FIGHT_TICKS} • ~{remaining}s left"
+            if tick < SABONG_FIGHT_TICKS
+            else "🔔 **The fight is over!**"
+        )
+        try:
+            await message.edit(embed=sabong_fight_embed(match, headline))
+        except discord.HTTPException:
+            pass
+
+    match["state"] = "done"
+    SABONG_MATCHES.pop(match["channel_id"], None)
+    result = settle_sabong(match, winner)
+    try:
+        await message.edit(
+            embed=sabong_fight_embed(
+                match,
+                f"🏆 **{SABONG_SIDE_LABELS[winner]} — {match['names'][winner]} wins!**",
+                discord.Color.gold(),
+            )
+        )
+    except discord.HTTPException:
+        pass
+    await match["channel"].send(sabong_result_text(match, result))
+
+
+@bot.command(name="sabong", aliases=["cockfight", "tari"])
+async def sabong(ctx, action: str = None, side: str = None):
+    """Stake into a pooled cockfight, then back MERON or WALA."""
+    match = SABONG_MATCHES.get(ctx.channel.id)
+    keyword = str(action or "").casefold()
+
+    if keyword in {"start", "simula"}:
+        if match is None:
+            return await ctx.send("No sabong is open here. Start one with `uwu sabong <amount>`.")
+        if match["state"] != "betting":
+            return await ctx.send("This sabong has already started.")
+        if match["host_id"] != ctx.author.id and not is_owner(ctx):
+            return await ctx.send(
+                f"Only **{match['host_name']}** can start this sabong."
+            )
+        placed = [bet for bet in match["bets"].values() if bet["side"] is not None]
+        if not placed:
+            return await ctx.send("Nobody has picked a rooster yet.")
+        match["state"] = "fighting"
+        await match["view"].close()
+        pools = [sabong_pool(match, name) for name in SABONG_SIDES]
+        if not all(pools):
+            await ctx.send(
+                "⚠️ Everyone is on one side, so there is no losing pool to share — "
+                "winners will only get their stake back."
+            )
+        await ctx.send(
+            f"🔔 **{match['host_name']}** rings the bell! Betting is closed.\n"
+            f"{sabong_odds_board(match)}"
+        )
+        return await run_sabong_fight(match)
+
+    if keyword in {"cancel", "stop"}:
+        if match is None:
+            return await ctx.send("No sabong is open here.")
+        if match["host_id"] != ctx.author.id and not is_owner(ctx):
+            return await ctx.send(f"Only **{match['host_name']}** can cancel this sabong.")
+        if match["state"] != "betting":
+            return await ctx.send("The fight is already under way.")
+        return await cancel_sabong(match, "🚫 Sabong cancelled.")
+
+    if action is None:
+        if match is None:
+            return await ctx.send(
+                "🐓 **Sabong** — pooled cockfight betting.\n"
+                "`uwu sabong <amount>` to stake, then click **MERON** or **WALA** "
+                "(or `uwu sabong <amount> meron` in one go).\n"
+                "The host runs `uwu sabong start` to begin the 3-minute fight.\n"
+                "Winners split the losing pool, so backing the unpopular rooster "
+                "pays the most."
+            )
+        return await ctx.send(embed=sabong_lobby_embed(match))
+
+    bet = parse_coins(action)
+    if bet is None:
+        return await ctx.send(
+            "❌ Invalid amount. Use `uwu sabong 1,000,000`, `uwu sabong start`, "
+            "or `uwu sabong cancel`."
+        )
+
+    chosen_side = None
+    if side is not None:
+        chosen_side = sabong_side(side)
+        if chosen_side is None:
+            return await ctx.send("❌ Pick a side: `meron` or `wala`.")
+
+    if match is not None and match["state"] != "betting":
+        return await ctx.send("Betting is closed — a fight is already running here.")
+
+    user = get_user(ctx.author.id)
+    validation_error = validate_bet(user, bet, "sabong")
+    if validation_error:
+        return await ctx.send(f"❌ {validation_error}")
+
+    if match is not None and ctx.author.id in match["bets"]:
+        existing = match["bets"][ctx.author.id]
+        placed_on = (
+            f" on **{SABONG_SIDE_LABELS[existing['side']]}**"
+            if existing["side"]
+            else " (still choosing a rooster)"
+        )
+        return await ctx.send(
+            f"You already staked `{format_coins(existing['amount'])}` uwuncy{placed_on}."
+        )
+
+    if not begin_game(user, "sabong", bet, reserve_bet=True):
+        return await ctx.send("❌ Not enough uwuncy.")
+    save_data(DATA)
+
+    if match is None:
+        match = {
+            "channel_id": ctx.channel.id,
+            "channel": ctx.channel,
+            "host_id": ctx.author.id,
+            "host_name": ctx.author.display_name,
+            "state": "betting",
+            "bets": {},
+            "hp": {name: SABONG_ROOSTER_HP for name in SABONG_SIDES},
+            "log": [],
+            "names": {
+                "meron": random.choice(SABONG_ROOSTER_NAMES),
+                "wala": random.choice(SABONG_ROOSTER_NAMES),
+            },
+        }
+        while match["names"]["wala"] == match["names"]["meron"]:
+            match["names"]["wala"] = random.choice(SABONG_ROOSTER_NAMES)
+        SABONG_MATCHES[ctx.channel.id] = match
+        match["bets"][ctx.author.id] = {
+            "name": ctx.author.display_name,
+            "amount": bet,
+            "side": chosen_side,
+        }
+        view = SabongLobbyView(match)
+        match["view"] = view
+        view.message = await ctx.send(
+            content=(
+                f"@here **{ctx.author.display_name} STARTED A SABONG! BET BET BET!** 🐓"
+            ),
+            embed=sabong_lobby_embed(match),
+            view=view,
+        )
+        return
+
+    match["bets"][ctx.author.id] = {
+        "name": ctx.author.display_name,
+        "amount": bet,
+        "side": chosen_side,
+    }
+    await match["view"].refresh()
+    if chosen_side:
+        return await ctx.send(
+            f"{SABONG_SIDE_EMOJI[chosen_side]} **{ctx.author.display_name}** backs "
+            f"**{SABONG_SIDE_LABELS[chosen_side]}** for "
+            f"`{format_coins(bet)}` uwuncy!"
+        )
+    await ctx.send(
+        f"🐓 **{ctx.author.display_name}** staked "
+        f"`{format_coins(bet)}` uwuncy — pick **MERON** or **WALA** above!"
+    )
+
 @bot.command(name="8ball", aliases=["magic8"])
 async def eightball(ctx,*,q=None):
     if not q: return await ctx.send("❌ Ask me something!")
@@ -9394,6 +10026,11 @@ async def help_cmd(ctx):
 ┃ `{p}wheel <bet> [low|mid|high]` — one spin, your pick of risk
 ┃ `{p}scratch <bet>` — scratch 3 of 9 tiles and match them
 ┃ Every win offers 🎲 Double or Nothing, up to 5 times in a row
+┣ 🐓 Sabong — bet against the crowd, not the house
+┃ `{p}sabong <bet> [meron|wala]` — stake in, then back a rooster
+┃ `{p}sabong start` — host rings the bell for the 3-minute live fight
+┃ `{p}sabong` — see the live pools • `{p}sabong cancel` — refund everyone
+┃ Winners split the losing pool, so the unpopular rooster pays the most
 ┃ `{p}create arena <1-5> <total-per-player>` `{p}arena join/status/start/cancel <id>`
 ┃ `{p}paired @user [arena-id]` — protected teammates for 2v2–5v5
 ┃ Server owner: `{p}arena channel setup` • restore with `{p}channel redo`
@@ -9553,13 +10190,14 @@ async def odds(ctx, game: str = None, percent: str = None):
         for name in DEFAULT_GAME_WIN_CHANCES:
             edge = game_house_edge(name)
             lines.append(
-                f"- `{name}`: **{get_game_win_chance(name):.1f}%** win"
+                f"- `{name}`: **{get_game_win_chance(name):.1f}%** {game_odds_meaning(name)}"
                 + ("" if edge is None else f" • house edge `{edge:+.1%}`")
             )
         return await ctx.send(
             "**Game win chances**\n"
             + "\n".join(lines)
             + "\n\nA positive house edge drains uwuncy; a negative one prints it."
+            + f"\n{SABONG_ODDS_NOTE}"
             + "\nUse `uwu odds <game> <percent>` or `uwu odds all <percent>`."
         )
 
@@ -9580,9 +10218,10 @@ async def odds(ctx, game: str = None, percent: str = None):
             game_name = target_games[0]
             edge = game_house_edge(game_name)
             return await ctx.send(
-                f"**{game_name}** win chance: "
+                f"**{game_name}** {game_odds_meaning(game_name)}: "
                 f"`{get_game_win_chance(game_name):.1f}%`"
                 + ("" if edge is None else f" • house edge `{edge:+.1%}`")
+                + (f"\n{SABONG_ODDS_NOTE}" if game_name == "sabong" else "")
             )
         return await ctx.send(
             "Add a percentage, for example: `uwu odds all 40`."
@@ -9601,11 +10240,14 @@ async def odds(ctx, game: str = None, percent: str = None):
 
     if len(target_games) == 1:
         return await ctx.send(
-            f"Set **{target_games[0]}** win chance to **{value:.1f}%**."
+            f"Set **{target_games[0]}** {game_odds_meaning(target_games[0])} "
+            f"to **{value:.1f}%**."
+            + (f"\n{SABONG_ODDS_NOTE}" if target_games[0] == "sabong" else "")
         )
     await ctx.send(
         f"Set win chance to **{value:.1f}%** for: "
         f"{', '.join(target_games)}."
+        + (f"\n{SABONG_ODDS_NOTE}" if "sabong" in target_games else "")
     )
 
 @bot.command(name="userodds", aliases=["userchance", "setuserodds"])
