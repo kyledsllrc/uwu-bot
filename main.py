@@ -64,16 +64,13 @@ def get_effective_game_win_chance(user_odds: float, base_chance: float) -> float
 # -------------------
 # Game Logic
 # -------------------
-def play_coinflip(user_odds: float) -> str:
-    win = chance_roll(get_effective_game_win_chance(user_odds, 0.5))
+def play_coinflip(user_id: int) -> str:
     return "You won the coinflip!" if win else "You lost the coinflip."
 
-def play_slots(user_odds: float) -> str:
-    win = chance_roll(get_effective_game_win_chance(user_odds, 0.3))
+def play_slots(user_id: int) -> str:
     return "Jackpot!" if win else "Better luck next time."
 
-def play_colorgame(user_odds: float) -> str:
-    target_win = chance_roll(user_odds)  # ✅ fixed string bug
+def play_colorgame(user_id: int) -> str:
     return "You guessed the right color!" if target_win else "Wrong color!"
 
 # -------------------
