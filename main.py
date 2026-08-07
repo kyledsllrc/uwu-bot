@@ -20,6 +20,10 @@ from datetime import datetime, timezone
 from threading import Lock
 import firebase_admin
 from firebase_admin import credentials, db
+from dotenv import load_dotenv
+
+# Hosts that expose secrets as a .env file rather than real environment variables.
+load_dotenv()
 
 # --- BOT OWNER ID ---
 BOT_OWNER_ID = "906461875221434428"
