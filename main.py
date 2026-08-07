@@ -49,74 +49,6 @@ bot = commands.Bot(
     help_command=None
 )
 
-# -------------------
-# Utility Functions
-# -------------------
-def chance_roll(chance: float) -> bool:
-    return random.random() < chance
-
-def get_user_game_win_chance(user_odds: float) -> float:
-    return user_odds
-
-def get_effective_game_win_chance(user_odds: float, base_chance: float) -> float:
-    return base_chance * user_odds
-
-# -------------------
-# Game Logic
-# -------------------
-def play_coinflip(user_odds: float) -> str:
-    win = chance_roll(get_effective_game_win_chance(user_odds, 0.5))
-    return "You won the coinflip!" if win else "You lost the coinflip."
-
-def play_slots(user_odds: float) -> str:
-    win = chance_roll(get_effective_game_win_chance(user_odds, 0.3))
-    return "Jackpot!" if win else "Better luck next time."
-
-def play_colorgame(user_odds: float) -> str:
-    target_win = chance_roll(user_odds)  # ✅ fixed string bug
-    return "You guessed the right color!" if target_win else "Wrong color!"
-
-# -------------------
-# User Odds Store
-# -------------------
-user_odds = {}
-
-# -------------------
-# Discord Commands
-# -------------------
-@bot.command()
-async def coinflip(ctx):
-    odds = user_odds.get(ctx.author.id, 1.0)
-    await ctx.send(play_coinflip(odds))
-
-@bot.command()
-async def slots(ctx):
-    odds = user_odds.get(ctx.author.id, 1.0)
-    await ctx.send(play_slots(odds))
-
-@bot.command()
-async def colorgame(ctx):
-    odds = user_odds.get(ctx.author.id, 1.0)
-    await ctx.send(play_colorgame(odds))
-
-@bot.command()
-async def resetodds(ctx):
-    user_odds[ctx.author.id] = 1.0
-    await ctx.send("Your odds have been reset to normal.")
-
-@bot.command()
-async def withdraw_crypto(ctx, amount: int):
-    await ctx.send(f"You withdrew {amount} coins.")
-
-@bot.command()
-async def give(ctx, member: str, amount: int):
-    await ctx.send(f"You gave {amount} coins to {member}.")
-
-# -------------------
-# Run Bot (using Replit secret)
-# -------------------
-TOKEN = os.environ.get("BOT_TOKEN")
-bot.run(TOKEN)
 # --- OWNER CHECK ---
 def is_owner(ctx):
     return str(ctx.author.id) == BOT_OWNER_ID
@@ -124,7 +56,7 @@ def is_owner(ctx):
 # ✅ FIREBASE PERSISTENCE
 # ==============================================
 DATA_FILE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "data.json")
+    os.path.join(os.path.dirname(__file__), "data.json")
 )
 DATA_LOCK = Lock()
 
@@ -2607,7 +2539,6 @@ def arena_round_draw_embed(arena_id_value, arena, round_state, result):
 
 def arena_round_winner_embed(arena_id_value, arena, round_state, winner_team, result):
     """Create the bold gold five-second transition screen between rounds."""
-    score = arena.get("team_wins", {})
     match_won = arena_has_match_winner(arena)
     transition = (
         f"**{arena_team_name(winner_team)} TEAM WON!**\n"
@@ -4141,7 +4072,6 @@ class UnoArenaGame:
 
     def hand_embed(self, user_id, status=None):
         hand = self.hands.get(str(user_id), [])
-        selected_hint = ""
         top = self.round_state.get("uno_discard", [{}])[-1]
         pending = int(self.round_state.get("uno_pending_draw", 0))
         description = (
@@ -4179,7 +4109,6 @@ class UnoArenaGame:
 
     def public_embed(self, status=None):
         top = self.round_state.get("uno_discard", [{}])[-1]
-        order = self.order
         hand_counts = self.round_state.get("uno_hands", {})
         counts = []
         for team_number in (1, 2):
@@ -5954,7 +5883,7 @@ async def on_raw_reaction_add(payload):
 async def on_ready():
     print(f"\n✅ BOT ONLINE — LOGGED IN AS: {bot.user}")
     print(f"✅ CURRENT PREFIX: '{CURRENT_PREFIX}'")
-    print(f"✅ OWNER MODE ACTIVE\n")
+    print("✅ OWNER MODE ACTIVE\n")
     if not crypto_market_loop.is_running():
         crypto_market_loop.start()
         print("✅ UWUCRYPTO MARKET LOOP ACTIVE")
@@ -6273,6 +6202,8 @@ async def cf(ctx, first: str, second: str):
             f"Wallet: `{format_coins(user['wallet'])}` uwuncy"
         )
 
+    if protection_notice:
+        msg += f"\n{protection_notice}"
     save_data(DATA)
     await ctx.send(msg)
 
@@ -6372,78 +6303,78 @@ async def withdraw(ctx, *args):
 async def withdraw_crypto(ctx, crypto: str = None, amount_text: str = "all"):
     await complete_crypto_withdrawal(ctx, crypto, amount_text)
 
-    @bot.command(name="give", aliases=["pay"])
-    async def give(ctx, *, args: str):
-        # --- PART 1: DETECT ROLE MENTION ---
-        role = None
-        if ctx.message.role_mentions:
-            role = ctx.message.role_mentions[0]
-            args = args.replace(f"{role.mention}", "").strip()
+@bot.command(name="give", aliases=["pay"])
+async def give(ctx, *, args: str):
+    # --- PART 1: DETECT ROLE MENTION ---
+    role = None
+    if ctx.message.role_mentions:
+        role = ctx.message.role_mentions[0]
+        args = args.replace(f"{role.mention}", "").strip()
 
-        # --- PART 2: ROLE MODE ---
-        if role:
-            # Get amount & check split
-            split_mode = "split" in args.lower()
-            clean_args = args.lower().replace("split", "").strip()
-            try:
-                amount = int(clean_args.replace(",", ""))
-            except ValueError:
-                return await ctx.send("❌ Enter valid number! Example: `uwu give role @VIP 1000` or `uwu give role @VIP split 5000`")
+    # --- PART 2: ROLE MODE ---
+    if role:
+        # Get amount & check split
+        split_mode = "split" in args.lower()
+        clean_args = args.lower().replace("split", "").strip()
+        try:
+            amount = int(clean_args.replace(",", ""))
+        except ValueError:
+            return await ctx.send("❌ Enter valid number! Example: `uwu give role @VIP 1000` or `uwu give role @VIP split 5000`")
 
-            # Get members: WITH ROLE, NOT BOT, NOT YOU
-            members = [m for m in ctx.guild.members if role in m.roles and not m.bot and m != ctx.author]
-            if not members:
-                return await ctx.send("❌ No valid members found in that role!")
+        # Get members: WITH ROLE, NOT BOT, NOT YOU
+        members = [m for m in ctx.guild.members if role in m.roles and not m.bot and m != ctx.author]
+        if not members:
+            return await ctx.send("❌ No valid members found in that role!")
 
-            # Calculate
-            if split_mode:
-                each_get = amount // len(members)
-                total_pay = amount
-                mode_text = f"(split equally: each gets {each_get:,})"
-            else:
-                each_get = amount
-                total_pay = each_get * len(members)
-                mode_text = f"(each gets full {each_get:,})"
-
-            # Check sender balance
-            sender = get_user(ctx.author.id)
-            if sender["wallet"] < total_pay:
-                return await ctx.send(f"❌ You need **{total_pay:,} uwuncy**! You only have {sender['wallet']:,}")
-
-            # Deduct & distribute
-            sender["wallet"] -= total_pay
-            for user in members:
-                receiver = get_user(user.id)
-                receiver["wallet"] += each_get
-
-            save_data(DATA)
-            return await ctx.send(f"✅ Gave **{role.name}** {len(members)} members {mode_text}\n💸 Total paid from you: **{total_pay:,} uwuncy**")
-
-        # --- PART 3: ORIGINAL DIRECT USER GIVE (KEEP YOUR OLD WORKING!) ---
+        # Calculate
+        if split_mode:
+            each_get = amount // len(members)
+            total_pay = amount
+            mode_text = f"(split equally: each gets {each_get:,})"
         else:
-            parts = args.split()
-            if len(parts) < 2:
-                return await ctx.send("❌ Use: `uwu give @user amount` or `uwu give role @Role amount / split amount`")
-            try:
-                member = await commands.MemberConverter().convert(ctx, parts[0])
-                amount = int(parts[1].replace(",", ""))
-            except:
-                return await ctx.send("❌ Invalid format! Example: `uwu give @Mark 50000`")
+            each_get = amount
+            total_pay = each_get * len(members)
+            mode_text = f"(each gets full {each_get:,})"
 
-            if amount <= 0 or member == ctx.author:
-                return await ctx.send("❌ Invalid amount or cannot send to yourself!")
+        # Check sender balance
+        sender = get_user(ctx.author.id)
+        if sender["wallet"] < total_pay:
+            return await ctx.send(f"❌ You need **{total_pay:,} uwuncy**! You only have {sender['wallet']:,}")
 
-            sender = get_user(ctx.author.id)
-            receiver = get_user(member.id)
+        # Deduct & distribute
+        sender["wallet"] -= total_pay
+        for user in members:
+            receiver = get_user(user.id)
+            receiver["wallet"] += each_get
 
-            if sender["wallet"] < amount:
-                return await ctx.send(f"❌ Not enough uwuncy!")
+        save_data(DATA)
+        return await ctx.send(f"✅ Gave **{role.name}** {len(members)} members {mode_text}\n💸 Total paid from you: **{total_pay:,} uwuncy**")
 
-            if not transfer_wallet(sender, receiver, amount):
-                return await ctx.send("❌ Transfer could not be completed.")
+    # --- PART 3: ORIGINAL DIRECT USER GIVE (KEEP YOUR OLD WORKING!) ---
+    else:
+        parts = args.split()
+        if len(parts) < 2:
+            return await ctx.send("❌ Use: `uwu give @user amount` or `uwu give role @Role amount / split amount`")
+        try:
+            member = await commands.MemberConverter().convert(ctx, parts[0])
+            amount = int(parts[1].replace(",", ""))
+        except:
+            return await ctx.send("❌ Invalid format! Example: `uwu give @Mark 50000`")
 
-            save_data(DATA)
-            await ctx.send(f"✅ Sent **{format_coins(amount)} uwuncy** to {member.mention}.")
+        if amount <= 0 or member == ctx.author:
+            return await ctx.send("❌ Invalid amount or cannot send to yourself!")
+
+        sender = get_user(ctx.author.id)
+        receiver = get_user(member.id)
+
+        if sender["wallet"] < amount:
+            return await ctx.send("❌ Not enough uwuncy!")
+
+        if not transfer_wallet(sender, receiver, amount):
+            return await ctx.send("❌ Transfer could not be completed.")
+
+        save_data(DATA)
+        await ctx.send(f"✅ Sent **{format_coins(amount)} uwuncy** to {member.mention}.")
 
 @bot.command(name="slot", aliases=["slots"])
 async def slot(ctx, bet: int):
@@ -6484,6 +6415,8 @@ async def slot(ctx, bet: int):
         finish_game(user, "slots", bet, False, loss_result["remaining_loss"])
         res += describe_loss(loss_result, bet, "No match")
 
+    if protection_notice:
+        res += f"\n{protection_notice}"
     save_data(DATA)
     await ctx.send(res)
 
@@ -6831,7 +6764,7 @@ async def colorgame(ctx, first: str, bet_text: str = None):
         "bet": bet,
         "selection": None,
         "slots": ["❔", "❔", "❔"],
-        "target_win": chance_roll("color_game", user_id=ctx.author.id),
+        "target_win": chance_roll("colorgame", user_id=ctx.author.id),
         "shield_notice": shield_notice(user, bet),
     }
     view = ColorGameView(ctx.author.id, game)
@@ -6905,6 +6838,8 @@ async def dice(ctx, bet: int, guess: int):
         finish_game(user, "dice", bet, False, loss_result["remaining_loss"])
         res = f"Result: **{num}** — {describe_loss(loss_result, bet, 'Loss')}"
 
+    if protection_notice:
+        res += f"\n{protection_notice}"
     save_data(DATA)
     await ctx.send(res)
 
@@ -6947,6 +6882,8 @@ async def highlow(ctx, bet: int, pick: str):
         finish_game(user, "highlow", bet, False, loss_result["remaining_loss"])
         res = f"Number: **{num}** — {describe_loss(loss_result, bet, 'Loss')}"
 
+    if protection_notice:
+        res += f"\n{protection_notice}"
     save_data(DATA)
     await ctx.send(res)
 
@@ -6971,6 +6908,8 @@ async def rr(ctx, bet: int):
         finish_game(user, "roulette", bet, False, loss_result["remaining_loss"])
         res = describe_loss(loss_result, bet, "Bang. Loss")
 
+    if protection_notice:
+        res += f"\n{protection_notice}"
     save_data(DATA)
     await ctx.send(res)
 
@@ -7176,7 +7115,6 @@ async def arena_command(
         if len(players) >= required_players:
             return await ctx.send("This arena is full.")
         user = get_user(ctx.author.id)
-        total_required = arena_total_requirement(arena)
         bet_amount = arena_player_bet(arena)
         entry_fee = arena_entry_fee(arena)
         match_reserve = arena_match_reserve(arena)
@@ -7282,7 +7220,7 @@ async def arena_command(
         try:
             save_arenas()
             await arena_channel.send(
-                f"🏟️ **Seven-round arena match started!**\n"
+                "🏟️ **Seven-round arena match started!**\n"
                 + (
                     f"Each player paid **{format_coins(arena_player_bet(arena))} uwuncy**. "
                     "No additional round charges will be taken. "
@@ -7492,7 +7430,7 @@ async def my_property(ctx):
     if not owned:
         return await ctx.send("You do not own any properties yet. Use `uwu properties`.")
     names = [PROPERTY_SHOP[key]["name"] for key in owned if key in PROPERTY_SHOP]
-    await ctx.send(f"🏠 **Your Properties**\n" + "\n".join(f"- {name}" for name in names))
+    await ctx.send("🏠 **Your Properties**\n" + "\n".join(f"- {name}" for name in names))
 
 @bot.command(name="collection", aliases=["collectibles", "museum"])
 async def collection(ctx):
