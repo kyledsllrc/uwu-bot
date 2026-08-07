@@ -65,12 +65,20 @@ FIREBASE_DATABASE_URL = os.environ.get(
     "https://uwu-bot-4cff1-default-rtdb.asia-southeast1.firebasedatabase.app",
 )
 
-def initialize_firebase():
-    raw_credentials = os.environ.get("FIREBASE_CREDENTIALS")
+def load_firebase_credentials():
+    """Read the service account as inline JSON or as a path to a JSON file."""
+    raw_credentials = os.environ.get("FIREBASE_CREDENTIALS", "").strip()
     if not raw_credentials:
         raise RuntimeError("FIREBASE_CREDENTIALS secret is not configured")
+    # Hosting panels that cap environment variable length can point this at a file.
+    if not raw_credentials.startswith("{"):
+        with open(raw_credentials, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    return json.loads(raw_credentials)
+
+def initialize_firebase():
     try:
-        credential_data = json.loads(raw_credentials)
+        credential_data = load_firebase_credentials()
         firebase_credential = credentials.Certificate(credential_data)
         if not firebase_admin._apps:
             firebase_admin.initialize_app(
@@ -8384,14 +8392,22 @@ def run_bot():
     finally:
         release_bot_lease()
 
+def start_keep_alive():
+    """Serve the health endpoint on the port the host assigned, if enabled."""
+    if os.environ.get("DISABLE_KEEPALIVE"):
+        return
+    port = int(os.environ.get("PORT") or os.environ.get("SERVER_PORT") or "8000")
+
+    def serve():
+        try:
+            app.run(host="0.0.0.0", port=port, use_reloader=False)
+        except OSError as exc:
+            # The bot itself does not need this endpoint, so a busy or
+            # unavailable port must not take the process down.
+            print(f"⚠️ Keep-alive server disabled: {exc}")
+
+    threading.Thread(target=serve, daemon=True).start()
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
-    threading.Thread(
-        target=lambda: app.run(
-            host="0.0.0.0",
-            port=port,
-            use_reloader=False,
-        ),
-        daemon=True,
-    ).start()
+    start_keep_alive()
     run_bot()
