@@ -62,7 +62,7 @@ DATA_LOCK = Lock()
 
 FIREBASE_DATABASE_URL = os.environ.get(
     "FIREBASE_DATABASE_URL",
-    "https://uwu-bot-4cff1-default-rtdb.firebaseio.com",
+    "https://uwu-bot-4cff1-default-rtdb.asia-southeast1.firebasedatabase.app",
 )
 
 def initialize_firebase():
@@ -5163,14 +5163,16 @@ class ColorGameView(discord.ui.View):
         if self.game.get("target_win"):
             self.game["slots"] = [selected] * 3
         else:
+            losing_colors = [color for color in colors if color != selected]
             if random.random() < 0.5:
-                other_color = random.choice(
-                    [color for color in colors if color != selected]
+                # Near miss: a pair the player did not pick, so it never pays.
+                pair_color = random.choice(losing_colors)
+                third_color = random.choice(
+                    [color for color in colors if color != pair_color]
                 )
-                self.game["slots"] = [selected, selected, other_color]
+                self.game["slots"] = [pair_color, pair_color, third_color]
                 random.shuffle(self.game["slots"])
             else:
-                losing_colors = [color for color in colors if color != selected]
                 self.game["slots"] = [
                     random.choice(losing_colors) for _ in range(3)
                 ]
