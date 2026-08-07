@@ -579,51 +579,50 @@ def crypto_market_embed():
 def get_game_win_chance(game):
     return float(GAME_WIN_CHANCES.get(game, 40.0))
 
-    def get_user_game_win_chance(user_id, game):
-        """Return a per-user win chance override, if one is configured."""
-        record = USER_GAME_ODDS.get(str(user_id), {})
-        if not isinstance(record, dict):
-            return None
-        setting = record.get(game)
-        if not isinstance(setting, dict):
-            return None
-        try:
-            percent = float(setting.get("percent"))
-        except (TypeError, ValueError):
-            return None
+def get_user_game_win_chance(user_id, game):
+    """Return a per-user win chance override, if one is configured."""
+    record = USER_GAME_ODDS.get(str(user_id), {})
+    if not isinstance(record, dict):
+        return None
+    setting = record.get(game)
+    if not isinstance(setting, dict):
+        return None
+    try:
+        percent = float(setting.get("percent"))
+    except (TypeError, ValueError):
+        return None
 
-        # ✅ ADD HARD LOCKS HERE — CRUCIAL FOR YOUR COMMANDS!
-        if setting.get("mode") == "win":
-            if percent >= 100:
-                return 100.0  # ✅ FORCE ALWAYS WIN
-            if percent <= 0:
-                return 0.0    # ❌ FORCE ALWAYS LOSE
-            return max(0.0, min(100.0, percent))
+    # ✅ ADD HARD LOCKS HERE — CRUCIAL FOR YOUR COMMANDS!
+    if setting.get("mode") == "win":
+        if percent >= 100:
+            return 100.0  # ✅ FORCE ALWAYS WIN
+        if percent <= 0:
+            return 0.0    # ❌ FORCE ALWAYS LOSE
+        return max(0.0, min(100.0, percent))
 
-        elif setting.get("mode") == "lose":
-            if percent >= 100:
-                return 0.0    # ❌ LOSE 100% = NEVER WIN
-            if percent <= 0:
-                return 100.0  # ✅ LOSE 0% = ALWAYS WIN
-            percent = 100.0 - percent
-            return max(0.0, min(100.0, percent))
+    elif setting.get("mode") == "lose":
+        if percent >= 100:
+            return 0.0    # ❌ LOSE 100% = NEVER WIN
+        if percent <= 0:
+            return 100.0  # ✅ LOSE 0% = ALWAYS WIN
+        percent = 100.0 - percent
+        return max(0.0, min(100.0, percent))
 
-    def get_effective_game_win_chance(game, user_id=None):
-        override = None
-        if user_id is not None:
-            override = get_user_game_win_chance(user_id, game)
-        # ✅ USE OVERRIDE IF EXISTS, ELSE GLOBAL
-        return get_game_win_chance(game) if override is None else override
+def get_effective_game_win_chance(game, user_id=None):
+    override = None
+    if user_id is not None:
+        override = get_user_game_win_chance(user_id, game)
+    # ✅ USE OVERRIDE IF EXISTS, ELSE GLOBAL
+    return get_game_win_chance(game) if override is None else override
 
-
-        def chance_roll(game, bonus=0.0, user_id=None):
-            chance = max(0.0, min(100.0, get_effective_game_win_chance(game, user_id) + bonus))
-            # ⚡ FORCE INSTANT RESULT — NO RANDOM CHANCE TO FAIL!
-            if chance >= 100:
-                return True
-            if chance <= 0:
-                return False
-            return random.random() < (chance / 100.0)
+def chance_roll(game, bonus=0.0, user_id=None):
+    chance = max(0.0, min(100.0, get_effective_game_win_chance(game, user_id) + bonus))
+    # ⚡ FORCE INSTANT RESULT — NO RANDOM CHANCE TO FAIL!
+    if chance >= 100:
+        return True
+    if chance <= 0:
+        return False
+    return random.random() < (chance / 100.0)
 
 def blackjack_score(hand):
     total = sum(card[1] for card in hand)
