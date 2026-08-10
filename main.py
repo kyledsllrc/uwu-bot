@@ -3683,9 +3683,10 @@ async def marry_cmd(ctx, *, arg: str = None):
     user_charisma = user.get("charisma", 0)
     if user_charisma < 1000:
         return await ctx.send(
-            f"❌ **Insufficient Charisma!** You need at least **1,000 Charisma** to marry someone.\n"
-            f"✨ Your current Charisma: **{user_charisma:,} / 1,000**\n"
-            f"💡 Buy flowers from `uwu flowershop` or send flowers to earn Charisma!"
+            f"**Insufficient Charisma**\n"
+            f"You need at least **1,000 Charisma** to marry someone.\n\n"
+            f"• **Current Charisma:** {user_charisma:,} / 1,000\n"
+            f"• **Tip:** Buy or gift flowers via `uwu flowershop` to earn Charisma."
         )
 
     if user["marriage_partner_id"] and user["marriage_partner_id"] != str(member.id):
@@ -3712,9 +3713,10 @@ async def marry_cmd(ctx, *, arg: str = None):
     }
 
     await ctx.send(
-        f"💍 💖 **MARRIAGE PROPOSAL!** {ctx.author.mention} has proposed to {member.mention}!\n"
-        f"✨ {ctx.author.display_name} meets the **1,000 Charisma** requirement ({user_charisma:,} Charisma)!\n"
-        f"👉 {member.mention}, type **`uwu marry agree`** (or `uwu marry decline`) to respond! (Expires in 5 minutes)"
+        f"**Marriage Proposal**\n"
+        f"{ctx.author.mention} has proposed to {member.mention}!\n\n"
+        f"• {ctx.author.display_name} meets the **1,000 Charisma** requirement ({user_charisma:,} Charisma).\n"
+        f"• {member.mention}, type `uwu marry accept` or `uwu marry decline` to respond. (Expires in 5 minutes)"
     )
 
 
@@ -16777,6 +16779,20 @@ async def on_member_join(member):
             except discord.HTTPException:
                 pass
 
+    # 3. Dedicated Invite Log Channel (if configured via uwu invites set #channel)
+    invite_channel_id = settings.get("invite_channel")
+    if invite_channel_id:
+        inv_channel = member.guild.get_channel(invite_channel_id)
+        if inv_channel is not None:
+            if inviter:
+                msg_text = f"🎉 {member.mention} joined! Invited by {inviter.mention} (**{inviter_net}** total invites)."
+            else:
+                msg_text = f"🎉 {member.mention} joined! (Direct join / unknown inviter)."
+            try:
+                await inv_channel.send(msg_text)
+            except discord.HTTPException:
+                pass
+
 
 @bot.event
 async def on_member_remove(member):
@@ -20943,14 +20959,17 @@ async def setwelcome_cmd(ctx, target: str = None, channel: discord.TextChannel =
             return await ctx.send(f"❌ Failed to send preview: {e}")
 
     target_channel = channel
-    if target_channel is None and ctx.message.channels:
-        target_channel = ctx.message.channels[0]
-    elif target_channel is None and target and target.startswith("<#"):
-        try:
-            chan_id = int(target.replace("<#", "").replace(">", ""))
-            target_channel = ctx.guild.get_channel(chan_id)
-        except Exception:
-            pass
+    if target_channel is None and ctx.message.channel_mentions:
+        target_channel = ctx.message.channel_mentions[0]
+    elif target_channel is None and target:
+        if target.startswith("<#") and target.endswith(">"):
+            try:
+                chan_id = int(target.replace("<#", "").replace(">", ""))
+                target_channel = ctx.guild.get_channel(chan_id)
+            except Exception:
+                pass
+        elif target.isdigit():
+            target_channel = ctx.guild.get_channel(int(target))
 
     if target_channel is None:
         current_id = settings.get("welcome_channel")
@@ -20959,9 +20978,9 @@ async def setwelcome_cmd(ctx, target: str = None, channel: discord.TextChannel =
         return await ctx.send(
             f"ℹ️ Welcome channel is {status}.\n\n"
             f"**Usage:**\n"
-            f"• `uwu set welcome #channel` — Set welcome channel\n"
-            f"• `uwu set welcome test` — Send a test welcome card preview\n"
-            f"• `uwu set welcome off` — Disable welcome cards"
+            f"• `uwu setwelcome #channel` — Set welcome channel\n"
+            f"• `uwu setwelcome test` — Send a test welcome card preview\n"
+            f"• `uwu setwelcome off` — Disable welcome cards"
         )
 
     settings["welcome_channel"] = target_channel.id
@@ -20982,87 +21001,103 @@ async def set_cmd(ctx, sub_cmd: str = None, target: str = None, channel: discord
     clean_sub = sub_cmd.lower()
     if clean_sub in ["welcome", "welcomechannel", "welcome_channel", "card"]:
         return await setwelcome_cmd(ctx, target=target, channel=channel)
+    elif clean_sub in ["invite", "invites", "invitechannel", "invlog"]:
+        return await invites_cmd(ctx, option="set", channel_or_member=target)
     else:
-        return await ctx.send(f"Unknown setting `{sub_cmd}`. Did you mean `uwu set welcome #channel`?")
+        return await ctx.send(f"Unknown setting `{sub_cmd}`. Options: `welcome`, `invites`.")
 
 
-@bot.command(name="invites", aliases=["invs", "invite"])
-async def invites_cmd(ctx, member: discord.Member = None):
-    """View invite statistics for yourself or a member."""
+@bot.command(name="invites", aliases=["invs", "invite", "invboard", "topinvites", "invleaderboard"])
+async def invites_cmd(ctx, option: str = None, channel_or_member: str = None):
+    """Single unified command to view invite leaderboards, user stats, sync, or configure invite tracking channel."""
     if ctx.guild is None:
         return await ctx.send("❌ This command can only be used inside a server.")
     if is_category_disabled(ctx.guild, 'moderation'):
         return await ctx.send("**Moderation commands are currently disabled.**")
 
-    target = member or ctx.author
-    g_store = get_invite_store(ctx.guild.id)
-    inv_stats = g_store["inviters"].get(str(target.id), {"regular": 0, "left": 0, "fake": 0})
+    settings = get_guild_moderation_settings(ctx.guild)
 
-    regular = inv_stats.get("regular", 0)
-    left = inv_stats.get("left", 0)
-    fake = inv_stats.get("fake", 0)
-    net = regular - left - fake
+    # Subcommand 1: set channel (e.g. `uwu invites set #channel` or `uwu invites #channel`)
+    if (option and option.lower() in ["set", "channel", "setup", "log"]) or (option and option.startswith("<#")):
+        if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+            return await ctx.send("❌ You need **Manage Server** permission to configure invite tracking channel.")
 
-    embed = discord.Embed(
-        title=f"✉️ Invite Statistics for {target.display_name}",
-        color=discord.Color.blue()
-    )
-    avatar_url = target.display_avatar.url if hasattr(target, "display_avatar") and target.display_avatar else None
-    if avatar_url:
-        embed.set_thumbnail(url=avatar_url)
+        target_chan = None
+        target_str = channel_or_member if (option in ["set", "channel", "setup", "log"]) else option
 
-    embed.add_field(
-        name="📊 Invite Breakdown",
-        value=(
-            f"✅ **Regular**: {regular}\n"
-            f"🚪 **Left**: {left}\n"
-            f"⚠️ **Fake / Alts**: {fake}\n"
-            f"✨ **Total Net Invites**: **{net}**"
-        ),
-        inline=False
-    )
-    await ctx.send(embed=embed)
+        if ctx.message.channel_mentions:
+            target_chan = ctx.message.channel_mentions[0]
+        elif target_str and target_str.startswith("<#"):
+            try:
+                cid = int(target_str.replace("<#", "").replace(">", ""))
+                target_chan = ctx.guild.get_channel(cid)
+            except Exception:
+                pass
+        elif target_str and target_str.isdigit():
+            target_chan = ctx.guild.get_channel(int(target_str))
 
+        if not target_chan:
+            curr_id = settings.get("invite_channel")
+            curr_chan = ctx.guild.get_channel(curr_id) if curr_id else None
+            status_str = f"currently set to {curr_chan.mention}" if curr_chan else "currently **not configured**"
+            return await ctx.send(f"ℹ️ Invite tracking log channel is {status_str}.\n**Usage:** `uwu invites set #channel` or `uwu invites off`.")
 
-@bot.command(name="inviter")
-async def inviter_cmd(ctx, member: discord.Member = None):
-    """Find out who invited a member to the server."""
-    if ctx.guild is None:
-        return await ctx.send("❌ This command can only be used inside a server.")
-    if is_category_disabled(ctx.guild, 'moderation'):
-        return await ctx.send("**Moderation commands are currently disabled.**")
+        settings["invite_channel"] = target_chan.id
+        save_guild_moderation_settings(ctx.guild)
+        return await ctx.send(f"✅ **Invite log channel successfully set to {target_chan.mention}!** The bot will announce who invited new members here.")
 
-    target = member or ctx.author
-    g_store = get_invite_store(ctx.guild.id)
-    mem_record = g_store["members"].get(str(target.id))
+    # Subcommand 2: turn off (e.g. `uwu invites off` / `disable`)
+    if option and option.lower() in ["off", "disable", "none", "remove"]:
+        if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+            return await ctx.send("❌ You need **Manage Server** permission to disable invite tracking.")
+        settings["invite_channel"] = None
+        save_guild_moderation_settings(ctx.guild)
+        return await ctx.send("❌ **Invite tracking log channel disabled.**")
 
-    if not mem_record or not mem_record.get("inviter_id"):
-        return await ctx.send(f"❓ **{target.display_name}** was invited by an **Unknown / Direct Join** or vanity link.")
+    # Subcommand 3: sync (e.g. `uwu invites sync`)
+    if option and option.lower() in ["sync", "resync"]:
+        if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+            return await ctx.send("❌ You need **Manage Server** permission to sync invites.")
+        msg = await ctx.send("🔄 **Syncing server invites with Discord API...**")
+        cache = await fetch_and_cache_guild_invites(ctx.guild)
+        return await msg.edit(content=f"✅ **Synced `{len(cache)}` active invite code(s) for {ctx.guild.name}!** Invite counter is live and active.")
 
-    inviter_id = mem_record["inviter_id"]
-    code = mem_record.get("code", "Unknown")
+    # Subcommand 4: Check individual member invite stats (e.g. `uwu invites @user`)
+    target_member = None
+    if option:
+        try:
+            target_member = await commands.MemberConverter().convert(ctx, option)
+        except Exception:
+            pass
 
-    inviter_obj = ctx.guild.get_member(int(inviter_id))
-    inviter_mention = inviter_obj.mention if inviter_obj else f"<@{inviter_id}>"
+    if target_member:
+        g_store = get_invite_store(ctx.guild.id)
+        inv_stats = g_store["inviters"].get(str(target_member.id), {"regular": 0, "left": 0, "fake": 0})
+        regular = inv_stats.get("regular", 0)
+        left = inv_stats.get("left", 0)
+        fake = inv_stats.get("fake", 0)
+        net = regular - left - fake
 
-    embed = discord.Embed(
-        title=f"🔎 Inviter Details for {target.display_name}",
-        color=discord.Color.purple()
-    )
-    embed.add_field(name="👤 Member", value=target.mention, inline=True)
-    embed.add_field(name="✉️ Invited By", value=inviter_mention, inline=True)
-    embed.add_field(name="🔗 Code Used", value=f"`{code}`", inline=True)
-    await ctx.send(embed=embed)
+        embed = discord.Embed(
+            title=f"✉️ Invite Statistics — {target_member.display_name}",
+            color=discord.Color.blue()
+        )
+        if hasattr(target_member, "display_avatar") and target_member.display_avatar:
+            embed.set_thumbnail(url=target_member.display_avatar.url)
 
+        embed.add_field(
+            name="Invite Summary",
+            value=(
+                f"• **Regular Joins:** {regular}\n"
+                f"• **Members Left:** {left}\n"
+                f"• **Fake / Alts:** {fake}\n"
+                f"• **Net Total Invites:** **{net}**"
+            ),
+            inline=False
+        )
+        return await ctx.send(embed=embed)
 
-@bot.command(name="invboard", aliases=["topinvites", "invleaderboard", "invitesleaderboard"])
-async def invboard_cmd(ctx):
-    """View top inviters in the server."""
-    if ctx.guild is None:
-        return await ctx.send("❌ This command can only be used inside a server.")
-    if is_category_disabled(ctx.guild, 'moderation'):
-        return await ctx.send("**Moderation commands are currently disabled.**")
-
+    # Default / Leaderboard: `uwu invites` or `uwu invites leaderboard`
     g_store = get_invite_store(ctx.guild.id)
     inviters = g_store.get("inviters", {})
 
@@ -21077,37 +21112,28 @@ async def invboard_cmd(ctx):
 
     leaderboard.sort(key=lambda x: x[1], reverse=True)
 
-    if not leaderboard:
-        return await ctx.send("🏆 **Invite Leaderboard**\nNo active invites tracked yet!")
+    curr_id = settings.get("invite_channel")
+    curr_chan = ctx.guild.get_channel(curr_id) if curr_id else None
+    chan_info = f"Log Channel: {curr_chan.mention}" if curr_chan else "Log Channel: *Not set* (`uwu invites set #channel`)"
 
     embed = discord.Embed(
-        title=f"🏆 Top Inviters — {ctx.guild.name}",
+        title=f"🏆 Top Server Inviters — {ctx.guild.name}",
+        description=f"📌 {chan_info}\n\n",
         color=discord.Color.gold()
     )
 
-    lines = []
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (uid, net, reg, left, fake) in enumerate(leaderboard[:10], start=1):
-        prefix = medals[i-1] if i <= 3 else f"`#{i}`"
-        lines.append(f"{prefix} <@{uid}> — **{net}** net (`{reg}` reg, `{left}` left, `{fake}` fake)")
+    if not leaderboard:
+        embed.description += "No active invites tracked yet. Invite friends using a server invite link!"
+    else:
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, net, reg, left, fake) in enumerate(leaderboard[:10], start=1):
+            prefix = medals[i-1] if i <= 3 else f"`#{i}`"
+            lines.append(f"{prefix} <@{uid}> — **{net}** invites (`{reg}` joined, `{left}` left)")
+        embed.description += "\n".join(lines)
 
-    embed.description = "\n".join(lines)
+    embed.set_footer(text="Commands: uwu invites [@user] | uwu invites set #channel | uwu invites sync")
     await ctx.send(embed=embed)
-
-
-@bot.command(name="syncinvites", aliases=["invsync", "syncinv"])
-async def syncinvites_cmd(ctx):
-    """Server owner/admin command to sync active guild invites with the bot cache."""
-    if ctx.guild is None:
-        return await ctx.send("❌ This command can only be used inside a server.")
-    if is_category_disabled(ctx.guild, 'moderation'):
-        return await ctx.send("**Moderation commands are currently disabled.**")
-    if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx) and not ctx.author.guild_permissions.administrator:
-        return await ctx.send("❌ **Admin Only.** You need administrator permissions to sync invites.")
-
-    msg = await ctx.send("🔄 **Syncing server invites with Discord API...**")
-    cache = await fetch_and_cache_guild_invites(ctx.guild)
-    await msg.edit(content=f"✅ **Synced `{len(cache)}` active invite code(s) for {ctx.guild.name}!** Realtime invite tracking is now active.")
 
 @bot.command(name="kick")
 async def kick_user(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
@@ -21288,36 +21314,6 @@ async def purge_messages(ctx, amount: int = None):
         await ctx.send(f"❌ Failed to purge messages: {e}")
 
 
-@bot.command(name="slowmode", aliases=["slow"])
-async def slowmode_cmd(ctx, seconds: str = None):
-    """Set or disable slowmode delay for the current channel."""
-    if ctx.guild is None:
-        return await ctx.send("❌ This command can only be used inside a server.")
-    if is_category_disabled(ctx.guild, 'moderation'):
-        return await ctx.send("**Moderation commands are currently disabled.**")
-    if not (ctx.author.guild_permissions.manage_channels or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
-        return await ctx.send("❌ You need **Manage Channels** permission to use this command.")
-    if seconds is None:
-        current = ctx.channel.slowmode_delay
-        status = f"currently `{current}s`" if current > 0 else "currently **disabled**"
-        return await ctx.send(f"⏳ Slowmode in {ctx.channel.mention} is {status}.\nUsage: `uwu slowmode <seconds|off>`")
-    
-    try:
-        sec = parse_duration_to_seconds(seconds)
-        if sec > 21600:
-            return await ctx.send("❌ Slowmode delay cannot exceed 21600 seconds (6 hours).")
-        await ctx.channel.edit(slowmode_delay=sec)
-        if sec == 0:
-            await ctx.send(f"⏳ **Slowmode disabled** in {ctx.channel.mention}.")
-        else:
-            await ctx.send(f"⏳ **Slowmode set to `{sec}s`** in {ctx.channel.mention}.")
-        await log_moderation_action(ctx.guild, f"Slowmode in #{ctx.channel.name} set to {sec}s by {ctx.author}")
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to manage this channel.")
-    except Exception as e:
-        await ctx.send(f"❌ Failed to set slowmode: {e}")
-
-
 @bot.command(name="warn")
 async def warn_user(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
     """Issue a warning to a server member."""
@@ -21358,38 +21354,6 @@ async def warn_user(ctx, member: discord.Member = None, *, reason: str = "No rea
     
     await ctx.send(embed=embed)
     await log_moderation_action(ctx.guild, f"Warned: {member} ({member.id}) by {ctx.author}. Total warns: {total}. Reason: {reason}")
-
-
-@bot.command(name="warns", aliases=["warnings", "warninglist"])
-async def warns_cmd(ctx, member: discord.Member = None):
-    """View warnings for a member."""
-    if ctx.guild is None:
-        return await ctx.send("❌ This command can only be used inside a server.")
-    if is_category_disabled(ctx.guild, 'moderation'):
-        return await ctx.send("**Moderation commands are currently disabled.**")
-    
-    target = member or ctx.author
-    settings = get_guild_moderation_settings(ctx.guild)
-    warns = settings.get("warnings", {})
-    user_warns = warns.get(str(target.id), [])
-    
-    if not user_warns:
-        return await ctx.send(f"✅ **{target.display_name}** has no active warnings.")
-    
-    embed = discord.Embed(
-        title=f"⚠️ Warnings for {target.display_name} ({len(user_warns)} total)",
-        color=discord.Color.gold()
-    )
-    lines = []
-    for idx, w in enumerate(user_warns, start=1):
-        mod = w.get("moderator", "Unknown")
-        reason = w.get("reason", "No reason")
-        ts = w.get("timestamp")
-        time_str = f"<t:{ts}:R>" if ts else ""
-        lines.append(f"`#{idx}` **Reason:** {reason} — *by {mod}* {time_str}")
-    
-    embed.description = "\n".join(lines[:15])
-    await ctx.send(embed=embed)
 
 
 @bot.command(name="clearwarns", aliases=["rmwarn", "delwarns"])
@@ -21581,16 +21545,11 @@ async def help_cmd(ctx, category: str = None):
                 ("mute", "@user [duration] [reason]"),
                 ("unmute", "@user [reason]"),
                 ("purge", "<amount>"),
-                ("slowmode", "<seconds|off>"),
                 ("warn", "@user [reason]"),
-                ("warns", "warnings [@user]"),
                 ("clearwarns", "@user"),
                 ("nick", "@user [nickname]"),
-                ("setwelcome", "welcome / welcomecard"),
-                ("invites", "invs / invite [@user]"),
-                ("inviter", "[@user]"),
-                ("invboard", "topinvites / invleaderboard"),
-                ("syncinvites", "invsync"),
+                ("setwelcome", "#channel / test / off"),
+                ("invites", "[@user | set #channel | sync]"),
                 ("antinuke", "on/off"),
                 ("antispam", "on/off"),
                 ("antiraid", "on/off"),
