@@ -3369,9 +3369,12 @@ MARRIAGE_PROPOSALS = {}  # target_id -> {"proposer_id": str, "timestamp": float}
 
 
 @bot.command(name='flowershop', aliases=['flowers', 'marriageshop', 'flowerstore'])
-async def flowershop_cmd(ctx):
+async def flowershop_cmd(ctx, *args):
     if is_category_disabled(ctx.guild, 'socials'):
         return await ctx.send("**Social commands are currently disabled.**")
+
+    if args:
+        return await sendflower_cmd(ctx, *args)
 
     embed = discord.Embed(
         title="💐 Marriage Flower Shop",
@@ -3433,7 +3436,7 @@ async def buyflower_cmd(ctx, flower_name: str = None, quantity: int = 1):
     )
 
 
-@bot.command(name='sendflower', aliases=['giftflower', 'giveflower', 'flowergive', 'flowersgive', 'flower', 'flowers'])
+@bot.command(name='sendflower', aliases=['giftflower', 'giveflower', 'flowergive', 'flowersgive', 'flower'])
 async def sendflower_cmd(ctx, *args):
     if is_category_disabled(ctx.guild, 'socials'):
         return await ctx.send("**Social commands are currently disabled.**")
