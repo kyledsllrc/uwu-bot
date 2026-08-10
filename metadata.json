@@ -1,0 +1,6 @@
+{
+  "name": "UwU Bot Workspace",
+  "description": "GitHub repository editor and dashboard for UwU Bot (https://github.com/kyledsllrc/uwu-bot)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

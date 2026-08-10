@@ -1,0 +1,13 @@
+discord.py[voice]
+flask
+firebase-admin
+google-cloud-firestore
+requests
+aiohttp
+python-dotenv
+pytest
+yt-dlp
+spotipy
+beautifulsoup4
+PyNaCl
+davey
