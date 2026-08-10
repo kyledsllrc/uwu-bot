@@ -2765,59 +2765,130 @@ def _sandbox190():
 
 
 # -----------------------------
-# Admin utility commands
+# Admin utility & User profile commands
 # -----------------------------
-@bot.command(name="profile")
+@bot.command(name="profile", aliases=["pfp_info", "whois", "prof"])
 async def profile_cmd(ctx, member: discord.Member = None):
-    """Show a user's account and server information similar to a welcome card."""
-    if ctx.guild is None:
-        member = member or ctx.author
-        created = member.created_at if hasattr(member, "created_at") else None
-        await ctx.send(f"User: {member}\nCreated: {created}")
-        return
+    """Show a user's account and server profile in a clean, formal format."""
     member = member or ctx.author
-    created = member.created_at
-    joined = member.joined_at
-    now = datetime.now(timezone.utc)
-    account_age_days = (now - created).days if created else "unknown"
-    join_age_days = (now - joined).days if joined else "unknown"
-    total_members = ctx.guild.member_count
-    top_role = member.top_role.name if member.top_role else "@everyone"
-    # Try to compute join position (best-effort)
-    try:
-        sorted_members = sorted([m for m in ctx.guild.members if m.joined_at is not None], key=lambda m: m.joined_at)
-        position = next((i + 1 for i, m in enumerate(sorted_members) if m.id == member.id), None)
-        position_text = f"#{position}" if position is not None else "unknown"
-    except Exception:
-        position_text = "unknown"
+    if ctx.guild is None:
+        created = member.created_at if hasattr(member, "created_at") else None
+        return await ctx.send(f"User: {member}\nCreated: {created}")
 
-    embed = discord.Embed(title=f"User Profile — {member}", color=discord.Color.blurple())
-    embed.set_thumbnail(url=member.display_avatar.url if hasattr(member, 'display_avatar') else member.avatar_url)
-    embed.add_field(name="Mention", value=member.mention, inline=True)
-    embed.add_field(name="Account Created", value=f"{created:%Y-%m-%d %H:%M UTC}\n({account_age_days} days)", inline=True)
-    embed.add_field(name="Server Joined", value=(f"{joined:%Y-%m-%d %H:%M UTC}\n({join_age_days} days)" if joined else "Not in server"), inline=True)
-    embed.add_field(name="Top Role", value=top_role, inline=True)
-    embed.add_field(name="Position", value=position_text, inline=True)
-    embed.add_field(name="Total Members", value=str(total_members), inline=True)
-    role_names = ", ".join([r.name for r in member.roles if r.name != "@everyone"]) or "None"
-    embed.add_field(name="Roles", value=role_names, inline=False)
+    position = get_member_position(ctx.guild, member)
+    total_members = getattr(ctx.guild, "member_count", position)
+    acc_age = format_account_age(getattr(member, "created_at", None))
+    joined_at = getattr(member, "joined_at", None)
+    joined_str = joined_at.strftime("%b %d, %Y") if joined_at else "Unknown"
+
+    avatar_url = None
+    if hasattr(member, "display_avatar") and member.display_avatar:
+        avatar_url = member.display_avatar.url
+    elif hasattr(member, "avatar_url"):
+        avatar_url = member.avatar_url
+    if not avatar_url:
+        avatar_url = "https://cdn.discordapp.com/embed/avatars/0.png"
+
+    # Inviter lookup
+    g_store = get_invite_store(ctx.guild.id)
+    mem_record = g_store.get("members", {}).get(str(member.id))
+    if mem_record and mem_record.get("inviter_id"):
+        inviter_id = mem_record["inviter_id"]
+        inviter_obj = ctx.guild.get_member(int(inviter_id))
+        inviter_str = inviter_obj.mention if inviter_obj else f"<@{inviter_id}>"
+    else:
+        inviter_str = "Unknown / Direct Join"
+
+    embed = discord.Embed(
+        title=f"User Profile — {member.display_name}",
+        color=discord.Color.from_rgb(47, 49, 54)
+    )
+    embed.set_thumbnail(url=avatar_url)
+
+    embed.add_field(
+        name="👤 User Information",
+        value=(
+            f"↳ **User**: {member.mention} (`{member.id}`)\n"
+            f"↳ **Account Age**: {acc_age}\n"
+            f"↳ **Joined Server**: {joined_str}\n"
+            f"↳ **Invited By**: {inviter_str}"
+        ),
+        inline=False
+    )
+
+    top_role = member.top_role.mention if member.top_role and member.top_role.name != "@everyone" else "None"
+    roles = [r.mention for r in member.roles if r.name != "@everyone"]
+    roles_str = ", ".join(roles[:5]) + (f" (+{len(roles)-5} more)" if len(roles) > 5 else "") if roles else "None"
+
+    embed.add_field(
+        name="📊 Server Statistics",
+        value=(
+            f"↳ **Position**: #{position} of {total_members}\n"
+            f"↳ **Top Role**: {top_role}\n"
+            f"↳ **Roles**: {roles_str}"
+        ),
+        inline=False
+    )
+
     member_data = get_user(member.id)
     charisma = member_data.get("charisma", 0)
-    embed.add_field(name="Charisma EXP", value=f"✨ **{charisma:,}** (Marriage Req: **1,000**)", inline=True)
     partner_id = member_data.get("marriage_partner_id")
     if partner_id:
-        partner_mention = f"<@{partner_id}>"
         marriage_level = member_data.get("marriage_level", 0)
-        marriage_badge = member_data.get("marriage_badge") or marriage_badge_name(marriage_level)
-        embed.add_field(
-            name="Marriage",
-            value=(
-                f"Partner: {partner_mention}\n"
-                f"Level: **{marriage_level}**\n"
-                f"Badge: **{marriage_badge}**"
-            ),
-            inline=False,
-        )
+        marriage_str = f"<@{partner_id}> (Level {marriage_level})"
+    else:
+        marriage_str = "Single"
+
+    embed.add_field(
+        name="💖 Social & Status",
+        value=(
+            f"↳ **Charisma EXP**: {charisma:,}\n"
+            f"↳ **Marriage Status**: {marriage_str}"
+        ),
+        inline=False
+    )
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="avatar", aliases=[",", "av", "pfp"])
+async def avatar_cmd(ctx, member: discord.Member = None):
+    """Fetch full-resolution profile avatar for a user."""
+    member = member or ctx.author
+
+    avatar = member.display_avatar if hasattr(member, "display_avatar") and member.display_avatar else getattr(member, "avatar_url", None)
+    avatar_url = str(avatar.url) if hasattr(avatar, "url") else (str(avatar) if avatar else "https://cdn.discordapp.com/embed/avatars/0.png")
+
+    embed = discord.Embed(
+        title=f"Avatar — {member.display_name}",
+        color=discord.Color.from_rgb(47, 49, 54)
+    )
+    embed.set_image(url=avatar_url)
+    embed.description = f"[Direct Link]({avatar_url})"
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="banner", aliases=["userbanner", "profilebanner"])
+async def banner_cmd(ctx, member: discord.Member = None):
+    """Fetch full-resolution profile banner for a user."""
+    member = member or ctx.author
+
+    try:
+        user_obj = await bot.fetch_user(member.id)
+    except Exception:
+        user_obj = member
+
+    banner = getattr(user_obj, "banner", None)
+    if not banner or not getattr(banner, "url", None):
+        return await ctx.send(f"❌ **{member.display_name}** does not have a custom profile banner.")
+
+    banner_url = banner.url
+    embed = discord.Embed(
+        title=f"Banner — {member.display_name}",
+        color=discord.Color.from_rgb(47, 49, 54)
+    )
+    embed.set_image(url=banner_url)
+    embed.description = f"[Direct Link]({banner_url})"
     await ctx.send(embed=embed)
 
 
@@ -21512,7 +21583,9 @@ async def help_cmd(ctx, category: str = None):
             "title": "Social",
             "aliases": ["profile", "socials"],
             "items": [
-                ("profile", ""),
+                ("profile", "[@user]"),
+                ("avatar", ", / av [@user]"),
+                ("banner", "[@user]"),
                 ("ig", ",ig"),
                 ("tt", ",tt"),
                 ("fb", ",fb"),
