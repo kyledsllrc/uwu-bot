@@ -19,7 +19,7 @@ import aiohttp
 from html import unescape
 import social_utils
 from typing import Union
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from threading import Lock
 from collections import deque
 from urllib.parse import quote_plus
@@ -1370,6 +1370,30 @@ def build_welcome_embed(guild, member, inviter=None, inviter_net=0):
 
 def save_guild_moderation_settings(guild):
     save_data(DATA)
+
+
+def parse_duration_to_seconds(time_str: str) -> int:
+    if not time_str:
+        return 0
+    time_str = time_str.lower().strip()
+    if time_str in ["off", "0", "none", "disable"]:
+        return 0
+    match = re.match(r"^(\d+)([s|m|h|d|w]?)$", time_str)
+    if not match:
+        raise ValueError("Invalid duration format. Use numbers with s, m, h, d, w (e.g., 10m, 2h, 1d).")
+    val, unit = match.groups()
+    val = int(val)
+    if unit == 's':
+        return val
+    elif unit == 'm' or unit == '':
+        return val * 60
+    elif unit == 'h':
+        return val * 3600
+    elif unit == 'd':
+        return val * 86400
+    elif unit == 'w':
+        return val * 604800
+    return val * 60
 
 
 def mark_suspicious_user(guild, user_id, reason):
@@ -21082,23 +21106,336 @@ async def syncinvites_cmd(ctx):
     cache = await fetch_and_cache_guild_invites(ctx.guild)
     await msg.edit(content=f"✅ **Synced `{len(cache)}` active invite code(s) for {ctx.guild.name}!** Realtime invite tracking is now active.")
 
+@bot.command(name="kick")
+async def kick_user(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
+    """Kick a member from the server."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.kick_members or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Kick Members** permission to use this command.")
+    if member is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu kick @user [reason]`")
+    if member.id == ctx.guild.owner_id:
+        return await ctx.send("❌ You cannot kick the server owner.")
+    if member.id == ctx.author.id:
+        return await ctx.send("❌ You cannot kick yourself.")
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
+        return await ctx.send("❌ You cannot kick someone with an equal or higher role than you.")
+    
+    try:
+        await member.kick(reason=f"Kicked by {ctx.author}: {reason}")
+        await ctx.send(f"👢 **Kicked {member.mention}** (`{member.id}`). Reason: *{reason}*")
+        await log_moderation_action(ctx.guild, f"Kicked: {member} ({member.id}) by {ctx.author}. Reason: {reason}")
+    except discord.Forbidden:
+        await ctx.send("❌ I do not have permission to kick this member.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to kick member: {e}")
+
+
 @bot.command(name="ban")
 async def ban_user(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
     """Ban a user from the server."""
     if ctx.guild is None:
         return await ctx.send("This command can only be used inside a server.")
-    if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
-        return await ctx.send("Owner only.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.ban_members or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Ban Members** permission to use this command.")
     if member is None:
         return await ctx.send("Use `uwu ban @user [reason]`.")
     if member.id == ctx.guild.owner_id:
         return await ctx.send("❌ I cannot ban the server owner.")
+    if member.id == ctx.author.id:
+        return await ctx.send("❌ You cannot ban yourself.")
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
+        return await ctx.send("❌ You cannot ban someone with an equal or higher role than you.")
     if await ban_user_for_moderation(ctx.guild, member, reason):
         await ctx.send(f"✅ Banned {member.mention}. Reason: {reason}")
     else:
         await ctx.send(
             "❌ Could not ban that user. Check bot permissions and target validity."
         )
+
+
+@bot.command(name="unban")
+async def unban_user(ctx, user_id: str = None, *, reason: str = "No reason provided"):
+    """Unban a user by ID or tag."""
+    if ctx.guild is None:
+        return await ctx.send("This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.ban_members or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Ban Members** permission to use this command.")
+    if user_id is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu unban <user_id_or_tag> [reason]`")
+    
+    try:
+        ban_entries = [entry async for entry in ctx.guild.bans()]
+        target_user = None
+        for ban_entry in ban_entries:
+            u = ban_entry.user
+            if str(u.id) == user_id or f"{u.name}#{u.discriminator}" == user_id or u.name == user_id:
+                target_user = u
+                break
+        
+        if target_user is None and user_id.isdigit():
+            try:
+                target_user = await bot.fetch_user(int(user_id))
+            except Exception:
+                pass
+            
+        if target_user:
+            await ctx.guild.unban(target_user, reason=f"Unbanned by {ctx.author}: {reason}")
+            await ctx.send(f"✅ **Unbanned {target_user.mention}** (`{target_user.id}`).")
+            await log_moderation_action(ctx.guild, f"Unbanned: {target_user} ({target_user.id}) by {ctx.author}. Reason: {reason}")
+        else:
+            await ctx.send(f"❌ User `{user_id}` not found in the ban list.")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have Ban Members permission.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to unban: {e}")
+
+
+@bot.command(name="mute", aliases=["timeout", "tempmute"])
+async def mute_user(ctx, member: discord.Member = None, duration: str = "10m", *, reason: str = "No reason provided"):
+    """Timeout / Mute a member for a specified duration (e.g. 10m, 1h, 1d)."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.moderate_members or ctx.author.guild_permissions.kick_members or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Timeout/Moderate Members** permission to use this command.")
+    if member is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu mute @user [duration] [reason]` (e.g. `uwu mute @user 10m spamming`)")
+    if member.id == ctx.guild.owner_id:
+        return await ctx.send("❌ You cannot mute the server owner.")
+    if member.id == ctx.author.id:
+        return await ctx.send("❌ You cannot mute yourself.")
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
+        return await ctx.send("❌ You cannot mute someone with an equal or higher role than you.")
+    
+    try:
+        seconds = parse_duration_to_seconds(duration)
+        if seconds <= 0:
+            return await ctx.send("❌ Invalid duration. Use e.g. `10m`, `1h`, `1d`.")
+        if seconds > 28 * 86400:
+            return await ctx.send("❌ Timeout duration cannot exceed 28 days.")
+        
+        td = timedelta(seconds=seconds)
+        await member.timeout(td, reason=f"Muted by {ctx.author}: {reason}")
+        await ctx.send(f"🔇 **Timed out {member.mention}** for **{duration}**. Reason: *{reason}*")
+        await log_moderation_action(ctx.guild, f"Muted: {member} ({member.id}) for {duration} by {ctx.author}. Reason: {reason}")
+    except discord.Forbidden:
+        await ctx.send("❌ I do not have permission to timeout this member.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to timeout member: {e}")
+
+
+@bot.command(name="unmute", aliases=["untimeout"])
+async def unmute_user(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
+    """Remove timeout / unmute a member."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.moderate_members or ctx.author.guild_permissions.kick_members or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Timeout/Moderate Members** permission to use this command.")
+    if member is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu unmute @user [reason]`")
+    
+    try:
+        await member.timeout(None, reason=f"Unmuted by {ctx.author}: {reason}")
+        await ctx.send(f"🔊 **Removed timeout from {member.mention}**.")
+        await log_moderation_action(ctx.guild, f"Unmuted: {member} ({member.id}) by {ctx.author}. Reason: {reason}")
+    except discord.Forbidden:
+        await ctx.send("❌ I do not have permission to remove timeout from this member.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to unmute member: {e}")
+
+
+@bot.command(name="purge", aliases=["clear", "clean"])
+async def purge_messages(ctx, amount: int = None):
+    """Purge / clear messages from the current channel."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.manage_messages or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Messages** permission to use this command.")
+    if amount is None or amount <= 0:
+        return await ctx.send("ℹ️ **Usage:** `uwu purge <amount>` (e.g. `uwu purge 20`)")
+    if amount > 100:
+        amount = 100
+    
+    try:
+        deleted = await ctx.channel.purge(limit=amount + 1)
+        count = max(0, len(deleted) - 1)
+        confirm = await ctx.send(f"🧹 **Cleared {count} message(s).**")
+        await asyncio.sleep(4)
+        try:
+            await confirm.delete()
+        except Exception:
+            pass
+        await log_moderation_action(ctx.guild, f"Purged {count} messages in #{ctx.channel.name} by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to manage/delete messages in this channel.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to purge messages: {e}")
+
+
+@bot.command(name="slowmode", aliases=["slow"])
+async def slowmode_cmd(ctx, seconds: str = None):
+    """Set or disable slowmode delay for the current channel."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.manage_channels or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Channels** permission to use this command.")
+    if seconds is None:
+        current = ctx.channel.slowmode_delay
+        status = f"currently `{current}s`" if current > 0 else "currently **disabled**"
+        return await ctx.send(f"⏳ Slowmode in {ctx.channel.mention} is {status}.\nUsage: `uwu slowmode <seconds|off>`")
+    
+    try:
+        sec = parse_duration_to_seconds(seconds)
+        if sec > 21600:
+            return await ctx.send("❌ Slowmode delay cannot exceed 21600 seconds (6 hours).")
+        await ctx.channel.edit(slowmode_delay=sec)
+        if sec == 0:
+            await ctx.send(f"⏳ **Slowmode disabled** in {ctx.channel.mention}.")
+        else:
+            await ctx.send(f"⏳ **Slowmode set to `{sec}s`** in {ctx.channel.mention}.")
+        await log_moderation_action(ctx.guild, f"Slowmode in #{ctx.channel.name} set to {sec}s by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to manage this channel.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to set slowmode: {e}")
+
+
+@bot.command(name="warn")
+async def warn_user(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
+    """Issue a warning to a server member."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.manage_messages or ctx.author.guild_permissions.kick_members or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Messages** or **Kick Members** permission to warn members.")
+    if member is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu warn @user [reason]`")
+    if member.id == ctx.guild.owner_id or member.id == ctx.author.id or member.bot:
+        return await ctx.send("❌ Cannot warn this user.")
+    
+    settings = get_guild_moderation_settings(ctx.guild)
+    warns = settings.setdefault("warnings", {})
+    user_warns = warns.setdefault(str(member.id), [])
+    
+    warn_entry = {
+        "reason": reason,
+        "moderator": ctx.author.display_name,
+        "moderator_id": ctx.author.id,
+        "timestamp": int(datetime.now(timezone.utc).timestamp())
+    }
+    user_warns.append(warn_entry)
+    save_guild_moderation_settings(ctx.guild)
+    
+    total = len(user_warns)
+    embed = discord.Embed(
+        title="⚠️ Member Warned",
+        description=f"{member.mention} has received a warning.",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="User", value=f"{member.display_name} (`{member.id}`)", inline=True)
+    embed.add_field(name="Total Warnings", value=f"**{total}**", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.set_footer(text=f"Warned by {ctx.author.display_name}")
+    
+    await ctx.send(embed=embed)
+    await log_moderation_action(ctx.guild, f"Warned: {member} ({member.id}) by {ctx.author}. Total warns: {total}. Reason: {reason}")
+
+
+@bot.command(name="warns", aliases=["warnings", "warninglist"])
+async def warns_cmd(ctx, member: discord.Member = None):
+    """View warnings for a member."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    
+    target = member or ctx.author
+    settings = get_guild_moderation_settings(ctx.guild)
+    warns = settings.get("warnings", {})
+    user_warns = warns.get(str(target.id), [])
+    
+    if not user_warns:
+        return await ctx.send(f"✅ **{target.display_name}** has no active warnings.")
+    
+    embed = discord.Embed(
+        title=f"⚠️ Warnings for {target.display_name} ({len(user_warns)} total)",
+        color=discord.Color.gold()
+    )
+    lines = []
+    for idx, w in enumerate(user_warns, start=1):
+        mod = w.get("moderator", "Unknown")
+        reason = w.get("reason", "No reason")
+        ts = w.get("timestamp")
+        time_str = f"<t:{ts}:R>" if ts else ""
+        lines.append(f"`#{idx}` **Reason:** {reason} — *by {mod}* {time_str}")
+    
+    embed.description = "\n".join(lines[:15])
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="clearwarns", aliases=["rmwarn", "delwarns"])
+async def clearwarns_cmd(ctx, member: discord.Member = None):
+    """Clear all warnings for a member."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.manage_messages or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Messages** permission to clear warnings.")
+    if member is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu clearwarns @user`")
+    
+    settings = get_guild_moderation_settings(ctx.guild)
+    warns = settings.setdefault("warnings", {})
+    if str(member.id) in warns and warns[str(member.id)]:
+        count = len(warns[str(member.id)])
+        warns[str(member.id)] = []
+        save_guild_moderation_settings(ctx.guild)
+        await ctx.send(f"✅ **Cleared `{count}` warning(s) for {member.mention}.**")
+        await log_moderation_action(ctx.guild, f"Cleared {count} warnings for {member} ({member.id}) by {ctx.author}")
+    else:
+        await ctx.send(f"ℹ️ {member.mention} has no warnings to clear.")
+
+
+@bot.command(name="nick", aliases=["nickname", "setnick"])
+async def nickname_cmd(ctx, member: discord.Member = None, *, new_nick: str = None):
+    """Change or reset a member's nickname."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if is_category_disabled(ctx.guild, 'moderation'):
+        return await ctx.send("**Moderation commands are currently disabled.**")
+    if not (ctx.author.guild_permissions.manage_nicknames or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Nicknames** permission to use this command.")
+    if member is None:
+        return await ctx.send("ℹ️ **Usage:** `uwu nick @user [new nickname]`")
+    
+    try:
+        await member.edit(nick=new_nick, reason=f"Nickname changed by {ctx.author}")
+        if new_nick:
+            await ctx.send(f"🏷️ Changed nickname for {member.mention} to **{new_nick}**.")
+        else:
+            await ctx.send(f"🏷️ Reset nickname for {member.mention}.")
+        await log_moderation_action(ctx.guild, f"Changed nickname for {member} ({member.id}) to '{new_nick}' by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("❌ I do not have permission to change this member's nickname.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to change nickname: {e}")
 
 @bot.command(name="rollback")
 async def rollback(ctx):
@@ -21235,6 +21572,17 @@ async def help_cmd(ctx, category: str = None):
             "title": "Moderation",
             "aliases": ["mod"],
             "items": [
+                ("kick", "@user [reason]"),
+                ("ban", "@user [reason]"),
+                ("unban", "<user_id_or_tag> [reason]"),
+                ("mute", "@user [duration] [reason]"),
+                ("unmute", "@user [reason]"),
+                ("purge", "<amount>"),
+                ("slowmode", "<seconds|off>"),
+                ("warn", "@user [reason]"),
+                ("warns", "warnings [@user]"),
+                ("clearwarns", "@user"),
+                ("nick", "@user [nickname]"),
                 ("setwelcome", "welcome / welcomecard"),
                 ("invites", "invs / invite [@user]"),
                 ("inviter", "[@user]"),
@@ -21244,7 +21592,6 @@ async def help_cmd(ctx, category: str = None):
                 ("antispam", "on/off"),
                 ("antiraid", "on/off"),
                 ("antibullying", "on/off"),
-                ("ban", "@user [reason]"),
                 ("rollback", ""),
                 ("lock", ""),
                 ("unlock", ""),
@@ -21302,9 +21649,6 @@ async def help_cmd(ctx, category: str = None):
     for key in HELP_CATEGORIES:
         if key == "admin":
             if is_owner(ctx):
-                available_categories.append(key)
-        elif key == "moderation":
-            if is_owner(ctx) or (ctx.guild and ctx.author.id == ctx.guild.owner_id):
                 available_categories.append(key)
         else:
             available_categories.append(key)
