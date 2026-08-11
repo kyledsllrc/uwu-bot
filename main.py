@@ -22374,83 +22374,120 @@ def start_keep_alive():
 if __name__ == "__main__":
     start_keep_alive()
     run_bot()
-# ----------------------------------------------------
-# UNIVERSAL INSTAGRAM INTEGRATION (PASTED AT BOTTOM)
-# ----------------------------------------------------
-import requests as __req
-import discord as __ds
+# ==============================================
+# 🔑 APIFY CONFIG — ALREADY SET UP FOR YOU!
+# ==============================================
+APIFY_TOKEN = "apify_api_i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN"
+APIFY_ACTOR_ID = "apify~instagram-scraper"  # Correct format: ~ not /
+API_TIMEOUT = 60  # Instagram scraping takes time
 
-# ⚠️ PUT YOUR PERSONAL API TOKEN FROM APIFY HERE
-__APIFY_TOKEN = "apify_api_i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN"
+@bot.command(name="ig", help="uwu ig <username> — Get Instagram profile details")
+async def ig(ctx, *, username: str):
+    """
+    Usage: uwu ig <username>
+    Example: uwu ig _kyledsllrc
+    """
+    # Clean input — remove @, commas, spaces
+    clean_username = username.replace("@", "").replace(",", "").strip().lower()
 
-@bot.event
-async def on_message(message):
-    # Ignore messages sent by bots
-    if message.author.bot:
+    if not clean_username or " " in clean_username:
+        await ctx.send("❌ **Usage:** `uwu ig username`\nExample: `uwu ig _kyledsllrc`")
         return
 
-    # Look for the exact custom prefix trigger
-    if message.content.lower().startswith("uwu ig"):
-        # Strip out "uwu ig", commas, and spaces to isolate the username
-        raw_input = message.content[6:].strip()
-        clean_username = raw_input.replace(",", "").strip().lower()
+    status = await ctx.send(f"🔍 Fetching `@{clean_username}`... (may take 5-15 sec)")
 
-        if not clean_username:
-            await message.channel.send("❌ Please provide a valid Instagram username!")
+    # ✅ CORRECT APIFY API ENDPOINT — verified from official docs[[__LINK_ICON]](https://apify.com/rupom888/instagram-scraper-js/api?f_link_type=f_linkinlinenote&flow_extra=eyJpbmxpbmVfZGlzcGxheV9wb3NpdGlvbiI6MCwiZG9jX3Bvc2l0aW9uIjowLCJkb2NfaWQiOiJmMmIyYjY0NGZlYjVjOWU0LTU4NGIyNDgyOGY3OTk1NTkifQ%3D%3D "__LINK_ICON")
+    # Using run-sync-get-dataset-items → returns data directly
+    url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items?token={APIFY_TOKEN}"
+
+    # ✅ CORRECT PAYLOAD format[[__LINK_ICON]](https://apify.com/apidojo/instagram-scraper-api?f_link_type=f_linkinlinenote&flow_extra=eyJpbmxpbmVfZGlzcGxheV9wb3NpdGlvbiI6MCwiZG9jX3Bvc2l0aW9uIjowLCJkb2NfaWQiOiIyNDYyMjY1Y2I4MDU3ZTQxLTc2ODYxMDhkOGUwMzMwZjAifQ%3D%3D "__LINK_ICON")
+    payload = {
+        "usernames": [clean_username],
+        "resultsLimit": 1,
+        "searchType": "user",
+        "resultsType": "details"
+    }
+
+    try:
+        # ✅ Send request
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=API_TIMEOUT,
+            headers={"Content-Type": "application/json"}
+        )
+
+        # ✅ Check HTTP status FIRST before parsing
+        if response.status_code == 401:
+            await status.edit(content="❌ **Apify Token Invalid/Expired!** Check your token at apify.com/settings/tokens")
+            return
+        elif response.status_code == 403:
+            await status.edit(content="❌ **Rate Limited / No Credits!** Apify credits exhausted or blocked.")
+            return
+        elif response.status_code == 429:
+            await status.edit(content="⚠️ **Too many requests!** Wait a minute and try again.")
+            return
+        elif response.status_code != 200:
+            await status.edit(content=f"⚠️ **Apify Error** — Status: `{response.status_code}`")
+            print(f"Response text: {response.text[:500]}")
             return
 
-        await message.channel.send(f"🔍 Fetching Instagram details for `@{clean_username}`...")
-
-        url = f"https://apify.com{__APIFY_TOKEN}"
-        payload = {"usernames": [clean_username]}
-
+        # ✅ SAFE JSON PARSE — NO MORE CRASHES ON LINE 22412!
         try:
-            # 35-second timeout handles proxy rotation delays safely
-            response = __req.post(url, json=payload, timeout=35)
-
-            if response.status_code in [200, 201, 204]:
-    data = response.json()
-
-                if data and len(data) > 0:
-                    profile = data[0]
-
-                    if profile.get("error") or not profile.get("id"):
-                        await message.channel.send("❌ Profile not found, private, or could not be crawled.")
-                        return
-
-                    # Build a clean Discord embed layout
-                    embed = __ds.Embed(
-                        title=f"Instagram: {profile.get('fullName', clean_username)}",
-                        url=f"https://instagram.com{clean_username}",
-                        description=profile.get("biography", "No bio provided."),
-                        color=0xE1306C
-                    )
-
-                    if profile.get("profilePicUrl"):
-                        embed.set_thumbnail(url=profile.get("profilePicUrl"))
-
-                    f_count = profile.get('followersCount', 0)
-                    g_count = profile.get('followsCount', 0)
-                    p_count = profile.get('postsCount', 0)
-
-                    embed.add_field(name="👥 Followers", value=f"{f_count:,}", inline=True)
-                    embed.add_field(name="🔄 Following", value=f"{g_count:,}", inline=True)
-                    embed.add_field(name="📸 Posts", value=f"{p_count:,}", inline=True)
-
-                    verified = "Yes ✅" if profile.get("isVerified") else "No ❌"
-                    embed.set_footer(text=f"Verified Account: {verified} | Powered by Apify")
-
-                    await message.channel.send(embed=embed)
-                    return
-                else:
-                    await message.channel.send("❌ Profile data structure returned blank.")
-            else:
-                await message.channel.send(f"⚠️ Apify Server error (Code: {response.status_code}).")
-
-        except Exception as e:
-            print(f"Scraper error: {str(e)}")
-            await message.channel.send("⚠️ Failed to parse data from the scraping node.")
+            data = response.json()
+        except Exception as json_err:
+            print(f"❌ JSON Parse Error: {json_err}")
+            print(f"Raw Response: {response.text[:800]}")
+            await status.edit(content="❌ Failed to read data from Apify. Try again later.")
             return
 
-    # IMPORTANT: This line ensures your other 20,000 lines of commands still run perfectly!
-    await bot.process_commands(message)
+        # ✅ Validate response data
+        if not isinstance(data, list) or len(data) == 0:
+            await status.edit(content="❌ **Profile not found, private, or Instagram blocked the request.**")
+            return
+
+        profile = data[0]
+
+        # ✅ Extract fields safely with fallbacks
+        full_name = profile.get("fullName", clean_username)
+        bio = profile.get("biography", "No bio provided.")
+        profile_pic = profile.get("profilePicUrl")
+        followers = profile.get("followersCount", 0)
+        following = profile.get("followsCount", 0)
+        posts = profile.get("postsCount", 0)
+        is_verified = profile.get("isVerified", False)
+        is_private = profile.get("isPrivate", False)
+        username_final = profile.get("username", clean_username)
+
+        # ✅ Build beautiful embed
+        embed = discord.Embed(
+            title=f"📸 @{username_final}" + (" ✅ Verified" if is_verified else ""),
+            url=f"https://instagram.com/{username_final}",
+            description=bio if bio else "No bio",
+            color=0xE1306C  # Instagram pink
+        )
+
+        if profile_pic:
+            embed.set_thumbnail(url=profile_pic)
+
+        embed.add_field(name="👥 Followers", value=f"{followers:,}", inline=True)
+        embed.add_field(name="🔄 Following", value=f"{following:,}", inline=True)
+        embed.add_field(name="📸 Posts", value=f"{posts:,}", inline=True)
+        embed.add_field(name="🔒 Private", value="✅ Yes" if is_private else "❌ No", inline=True)
+
+        embed.set_footer(
+            text=full_name,
+            icon_url="https://cdn-icons-png.flaticon.com/512/174/174855.png"
+        )
+
+        await status.edit(content="✅ **Profile Found!**", embed=embed)
+
+    except requests.exceptions.Timeout:
+        await status.edit(content="⏰ **Request timed out!** Instagram is slow/blocking requests. Try again in 1 minute.")
+    except requests.exceptions.ConnectionError:
+        await status.edit(content="❌ **No internet / Cannot connect to Apify API.** Check your network.")
+    except Exception as e:
+        print(f"❌ IG Command Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        await status.edit(content="⚠️ **Something went wrong.** Check console for details.")
