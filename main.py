@@ -3016,12 +3016,25 @@ async def ig_cmd(ctx, identifier: str):
                         counts = {}
                 if not counts:
                     counts = social_utils.get_instagram_counts_from_html(html) or {}
-                if not counts:
-                    counts = social_utils.parse_counts_from_description(desc)
+                if not counts and desc:
+                    parsed_c, _ = social_utils.parse_counts_from_description(desc)
+                    counts = parsed_c or {}
                 if not full_profile:
                     full_profile = social_utils.get_instagram_profile_from_html(html) or {}
                 if not raw:
                     raw = full_profile.get('biography')
+
+            # Ensure we retrieved valid profile data before sending embed
+            has_valid_info = bool(
+                full_profile.get('name') or
+                full_profile.get('profile_pic_url') or
+                full_profile.get('biography') or
+                (isinstance(counts, dict) and any(v for v in counts.values() if v is not None))
+            )
+            if not has_valid_info:
+                return await ctx.send(
+                    f"❌ Could not fetch Instagram profile for **@{username}**. The account may be private, non-existent, or Instagram blocked the request."
+                )
             display_name = full_profile.get('name') or username
             is_private = bool(full_profile.get('is_private'))
             lock_suffix = " 🔒" if is_private else ""
@@ -3135,6 +3148,18 @@ async def tt_cmd(ctx, identifier: str):
                     'followers': profile.get('followers'),
                 }
                 raw_desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description')
+
+            # Ensure we retrieved valid profile data before sending embed
+            has_valid_info = bool(
+                profile.get('name') or
+                profile.get('profile_pic_url') or
+                profile.get('biography') or
+                (isinstance(counts, dict) and any(v for v in counts.values() if v is not None and v != "0"))
+            )
+            if not has_valid_info:
+                return await ctx.send(
+                    f"❌ Could not fetch TikTok profile for **@{username}**. The account may be private, non-existent, or TikTok blocked the request."
+                )
 
             display_name = profile.get('name') or username
             is_private = bool(profile.get('is_private'))
