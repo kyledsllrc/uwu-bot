@@ -1489,6 +1489,8 @@ def _normalize_category(name: str):
         return "instagram"
     if n in {"tt", "tiktok"}:
         return "tiktok"
+    if n in {"fb", "facebook"}:
+        return "facebook"
     return n
 
 
@@ -1498,7 +1500,7 @@ def is_category_disabled(guild, category: str):
     gid = "global" if guild is None else str(guild.id)
     disabled = set(store.get(gid, []))
     # If overall socials disabled, treat specific socials as disabled
-    if "socials" in disabled and cat in {"instagram", "tiktok"}:
+    if "socials" in disabled and cat in {"instagram", "tiktok", "facebook"}:
         return True
     return cat in disabled
 
@@ -3212,7 +3214,114 @@ async def tt_cmd(ctx, identifier: str):
         print(f"Error in tt_cmd: {exc}")
 
 
+@bot.command(name='fb', aliases=[',fb'])
+async def fb_cmd(ctx, identifier: str):
+    """Lookup a Facebook page or profile by URL or username."""
+    if is_category_disabled(ctx.guild, 'socials') or is_category_disabled(ctx.guild, 'facebook'):
+        who = ctx.author.display_name if ctx.author else f"<@{BOT_OWNER_ID}>"
+        embed = discord.Embed(
+            description=f"**Socials have been turned OFF by {who}**",
+            color=discord.Color.gold(),
+        )
+        return await ctx.send(embed=embed)
+
+    raw_input = identifier.strip()
+    username = raw_input
+    if 'facebook.com' in username:
+        parts = re.split(r'[/?#]+', username)
+        parts = [p for p in parts if p and p not in {'http:', 'https:', 'www.facebook.com', 'm.facebook.com', 'facebook.com'}]
+        if parts:
+            username = parts[0]
+    username = username.lstrip('@')
+    url = f"https://www.facebook.com/{username}"
+
+    def fmt_num(val):
+        if val is None:
+            return "0"
+        val_str = str(val).replace(',', '').strip()
+        if val_str.isdigit():
+            return f"{int(val_str):,}"
+        return str(val)
+
+    try:
+        async with ctx.typing():
+            api_result = await social_utils.try_facebook_api(raw_input)
+            if not api_result or not isinstance(api_result, dict):
+                # Try fallback HTML scraping
+                html, status = await social_utils.fetch_html(f"https://m.facebook.com/{username}")
+                if html:
+                    profile = social_utils.get_facebook_profile_from_html(html)
+                    if profile and (profile.get('name') or profile.get('profile_pic_url') or profile.get('biography')):
+                        api_result = profile
+
+            has_valid_info = bool(
+                isinstance(api_result, dict) and (
+                    api_result.get('name') or
+                    api_result.get('profile_pic_url') or
+                    api_result.get('biography') or
+                    api_result.get('followers') or
+                    api_result.get('likes')
+                )
+            )
+
+            if not has_valid_info:
+                return await ctx.send(
+                    f"❌ Could not fetch Facebook profile for **{username}**. The account may be private, non-existent, or Facebook blocked the request."
+                )
+
+            title_name = api_result.get('name') or username
+            user_handle = api_result.get('username') or username
+            if title_name.lower() != user_handle.lower():
+                title_text = f"{title_name} ({user_handle})"
+            else:
+                title_text = title_name
+
+            profile_url = api_result.get('url') or url
+            embed = discord.Embed(
+                title=title_text,
+                url=profile_url,
+                color=discord.Color.from_rgb(24, 119, 242)
+            )
+
+            avatar_url = api_result.get('profile_pic_url')
+            if avatar_url:
+                embed.set_author(name=title_name, icon_url=avatar_url, url=profile_url)
+                embed.set_thumbnail(url=avatar_url)
+            else:
+                embed.set_author(name=title_name, url=profile_url)
+
+            desc_parts = []
+            if api_result.get('biography'):
+                desc_parts.append(api_result['biography'])
+            if api_result.get('categories'):
+                cats = api_result['categories']
+                if isinstance(cats, list) and cats:
+                    desc_parts.append(f"🏷️ **Category:** {', '.join(cats)}")
+            if api_result.get('work'):
+                desc_parts.append(f"💼 {api_result['work']}")
+            if api_result.get('education'):
+                desc_parts.append(f"🎓 {api_result['education']}")
+            if api_result.get('city'):
+                desc_parts.append(f"📍 {api_result['city']}")
+
+            if desc_parts:
+                desc_text = "\n".join(desc_parts)
+                embed.description = (desc_text[:1900] + '...') if len(desc_text) > 1900 else desc_text
+
+            if api_result.get('followers') is not None:
+                embed.add_field(name="Followers", value=fmt_num(api_result['followers']), inline=True)
+            if api_result.get('likes') is not None:
+                embed.add_field(name="Likes", value=fmt_num(api_result['likes']), inline=True)
+
+            fb_icon_url = "https://cdn-icons-png.flaticon.com/512/124/124010.png"
+            embed.set_footer(text="Facebook", icon_url=fb_icon_url)
+            await ctx.send(embed=embed)
+    except Exception as exc:
+        print(f"Error in fb_cmd: {exc}")
+
+
 async def _music_play_next(ctx, guild_id: str):
+
     await play_next_track(guild_id)
 
 

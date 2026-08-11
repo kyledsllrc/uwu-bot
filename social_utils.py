@@ -264,6 +264,23 @@ def get_tiktok_profile_from_html(html):
     return profile
 
 
+def get_facebook_profile_from_html(html):
+    profile = {
+        'profile_pic_url': extract_og_meta(html, 'og:image'),
+        'name': extract_og_meta(html, 'og:title'),
+        'biography': extract_og_meta(html, 'og:description'),
+        'url': extract_og_meta(html, 'og:url'),
+    }
+    if profile['biography']:
+        followers = re.search(r'([\d,\.]+)\s+Followers', profile['biography'], re.I)
+        if followers:
+            profile['followers'] = followers.group(1)
+        likes = re.search(r'([\d,\.]+)\s+Likes', profile['biography'], re.I)
+        if likes:
+            profile['likes'] = likes.group(1)
+    return profile
+
+
 def get_tiktok_counts_from_sig_state(html):
     # Best-effort: look for JSON objects containing 'followers' or 'fans'
     m = re.search(r'(?:window\.__INIT_PROPS__|window\.__INIT_DATA__|<script[^>]+id="SIGI_STATE"[^>]*>)(.*?)</script>', html, re.S | re.I)
@@ -489,3 +506,75 @@ async def try_tiktok_api(username):
         print(f"Apify TikTok fallback actor failed: {exc}")
 
     return None
+
+
+async def try_facebook_api(identifier):
+    clean_id = identifier.strip()
+    if 'facebook.com' in clean_id:
+        parts = clean_id.split('facebook.com/')[-1].split('/')[0].split('?')[0].strip()
+        if parts:
+            clean_id = parts
+    clean_id = clean_id.lstrip('@')
+    if not clean_id:
+        return None
+
+    _load_disk_cache()
+    now = time.time()
+    cache_key = f"fb_{clean_id.lower()}"
+    if cache_key in _IG_PROFILE_CACHE:
+        entry = _IG_PROFILE_CACHE[cache_key]
+        if isinstance(entry, dict) and (now - entry.get("_ts", 0)) < _IG_CACHE_TTL:
+            cached_data = dict(entry)
+            cached_data.pop("_ts", None)
+            return cached_data
+
+    token = (
+        os.getenv("APIFY_API_TOKEN") or
+        os.getenv("APIFY_TOKEN") or
+        os.getenv("APIFY_KEY") or
+        os.getenv("FB_API_TOKEN") or
+        DEFAULT_APIFY_TOKEN
+    )
+    if not token:
+        return None
+
+    loop = asyncio.get_running_loop()
+    target_url = f"https://www.facebook.com/{clean_id}"
+    url = f"https://api.apify.com/v2/acts/apify~facebook-pages-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
+    payload = {"startUrls": [{"url": target_url}], "maxItems": 1}
+
+    try:
+        items = await loop.run_in_executor(None, _sync_post_json, url, payload, 15)
+        if isinstance(items, list) and len(items) > 0:
+            item = items[0]
+            if isinstance(item, dict) and (item.get("title") or item.get("pageName")):
+                info_bio = ""
+                if item.get("intro"):
+                    info_bio = item["intro"]
+                elif isinstance(item.get("info"), list) and item["info"]:
+                    info_bio = " • ".join(str(i) for i in item["info"])
+
+                res = {
+                    "username": item.get("pageName") or clean_id,
+                    "name": item.get("title") or item.get("pageName") or clean_id,
+                    "biography": info_bio,
+                    "followers": str(item.get("followers")) if item.get("followers") is not None else None,
+                    "likes": str(item.get("likes")) if item.get("likes") is not None else None,
+                    "profile_pic_url": item.get("profilePictureUrl") or item.get("profilePic"),
+                    "cover_photo_url": item.get("coverPhotoUrl"),
+                    "url": item.get("facebookUrl") or item.get("pageUrl") or target_url,
+                    "categories": item.get("categories") or [],
+                    "work": item.get("work") or item.get("WORK"),
+                    "education": item.get("education") or item.get("EDUCATION"),
+                    "city": item.get("current_city") or item.get("CURRENT_CITY"),
+                }
+                cache_entry = dict(res)
+                cache_entry["_ts"] = now
+                _IG_PROFILE_CACHE[cache_key] = cache_entry
+                _save_disk_cache()
+                return res
+    except Exception as exc:
+        print(f"Apify Facebook scraper failed: {exc}")
+
+    return None
+
