@@ -2993,7 +2993,7 @@ async def ig_cmd(ctx, identifier: str):
                 html, status = await social_utils.fetch_html(url)
                 if not html:
                     status_text = f"HTTP {status}" if status else "network error"
-                    has_token = bool(os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("APIFY_KEY") or os.getenv("IG_API_TOKEN") or getattr(social_utils, "DEFAULT_APIFY_TOKEN", None))
+                    has_token = bool(social_utils.get_apify_tokens())
                     token_tip = "" if has_token else "\n💡 **Tip**: Set `APIFY_API_TOKEN` environment variable to use Apify for Instagram lookups."
                     return await ctx.send(
                         f"❌ Could not fetch Instagram profile for **@{username}**. Instagram blocked the request ({status_text}).{token_tip}"

@@ -313,6 +313,103 @@ def get_tiktok_counts_from_sig_state(html):
 _dummy = get_instagram_counts_from_shared_data  # keep linter quiet
 
 
+_EXHAUSTED_TOKENS = set()
+
+
+def get_apify_tokens():
+    """Retrieve list of configured Apify API tokens in preference order (supports up to 5+ accounts)."""
+    tokens = []
+    # 1. Comma-separated token lists from env
+    for env_var in ("APIFY_API_TOKENS", "APIFY_TOKENS"):
+        val = os.getenv(env_var)
+        if val:
+            for t in val.split(","):
+                t = t.strip()
+                if t:
+                    tokens.append(t)
+
+    # 2. Numbered env vars (e.g. APIFY_API_TOKEN_1, APIFY_API_TOKEN_2 ... up to 10)
+    for i in range(1, 10):
+        for prefix in ("APIFY_API_TOKEN_", "APIFY_TOKEN_", "APIFY_KEY_"):
+            val = os.getenv(f"{prefix}{i}")
+            if val and val.strip():
+                tokens.append(val.strip())
+
+    # 3. Single env vars
+    for env_var in ("APIFY_API_TOKEN", "APIFY_TOKEN", "APIFY_KEY", "IG_API_TOKEN", "FB_API_TOKEN"):
+        val = os.getenv(env_var)
+        if val and val.strip():
+            tokens.append(val.strip())
+
+    # 4. Default token fallback
+    if DEFAULT_APIFY_TOKEN:
+        tokens.append(DEFAULT_APIFY_TOKEN)
+
+    # Deduplicate while preserving order
+    seen = set()
+    result = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
+def _sync_run_actor_item(actor_name, payload, api_timeout=20, req_timeout=25):
+    """
+    Synchronously post to an Apify actor with automatic token rotation and failover.
+    Iterates through configured Apify tokens in order.
+    If a token hits a limit (HTTP 401, 402, 403, 429, or limit error in response),
+    it is marked as exhausted and execution fails over to the next token in order.
+    """
+    tokens = get_apify_tokens()
+    if not tokens:
+        return None
+
+    active_tokens = [t for t in tokens if t not in _EXHAUSTED_TOKENS]
+    if not active_tokens:
+        # All tokens marked exhausted; reset list in case limits/billing reset
+        _EXHAUSTED_TOKENS.clear()
+        active_tokens = list(tokens)
+
+    for token in active_tokens:
+        url = f"https://api.apify.com/v2/acts/{actor_name}/run-sync-get-dataset-items?token={token}&timeout={api_timeout}"
+        data_bytes = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            url,
+            data=data_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                if 200 <= resp.status < 300:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                    res_json = json.loads(body)
+                    # Check for Apify API error structure
+                    if isinstance(res_json, dict) and (res_json.get("error") or res_json.get("type") == "RATE_LIMIT_EXCEEDED"):
+                        error_type = res_json.get("type") or res_json.get("error")
+                        print(f"[Apify] Token ...{token[-6:]} returned error '{error_type}'. Failing over to next token...")
+                        _EXHAUSTED_TOKENS.add(token)
+                        continue
+                    return res_json
+        except urllib.error.HTTPError as exc:
+            # 401 Unauthorized, 402 Payment Required (limit reached), 403 Forbidden, 429 Rate limited
+            if exc.code in (401, 402, 403, 429):
+                print(f"[Apify] Token ...{token[-6:]} hit limit/quota (HTTP {exc.code}). Failing over to next token...")
+                _EXHAUSTED_TOKENS.add(token)
+                continue
+            else:
+                print(f"[Apify] HTTP Error {exc.code} for token ...{token[-6:]}: {exc}")
+        except Exception as exc:
+            print(f"[Apify] Request failed for token ...{token[-6:]}: {exc}")
+
+    return None
+
+
 def _sync_post_json(url, payload, timeout=45):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(
@@ -335,7 +432,7 @@ def _sync_post_json(url, payload, timeout=45):
 
 
 async def try_instagram_api(username):
-    """Attempt to use Apify API (APIFY_API_TOKEN / APIFY_TOKEN) or IG_API_TOKEN if credentials are available."""
+    """Attempt to use Apify API with automatic token rotation and failover."""
     clean_user = username.strip().lstrip("@")
     if not clean_user:
         return None
@@ -351,23 +448,16 @@ async def try_instagram_api(username):
             cached_data.pop("_ts", None)
             return cached_data
 
-    token = (
-        os.getenv("APIFY_API_TOKEN") or
-        os.getenv("APIFY_TOKEN") or
-        os.getenv("APIFY_KEY") or
-        os.getenv("IG_API_TOKEN") or
-        DEFAULT_APIFY_TOKEN
-    )
-    if not token:
+    tokens = get_apify_tokens()
+    if not tokens:
         return None
 
     loop = asyncio.get_running_loop()
 
     # Try actor 1: apify~instagram-profile-scraper (with 20s timeout on Apify side)
-    url1 = f"https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token={token}&timeout=20"
     payload1 = {"usernames": [clean_user], "resultsLimit": 1}
     try:
-        items = await loop.run_in_executor(None, _sync_post_json, url1, payload1, 25)
+        items = await loop.run_in_executor(None, _sync_run_actor_item, "apify~instagram-profile-scraper", payload1, 20, 25)
         if isinstance(items, list) and len(items) > 0:
             data = items[0]
             if isinstance(data, dict) and (data.get("username") or data.get("followersCount") is not None or data.get("fullName")):
@@ -392,10 +482,9 @@ async def try_instagram_api(username):
         print(f"Apify actor 1 failed: {exc}")
 
     # Fallback to actor 2: apify~instagram-scraper (with 15s timeout on Apify side)
-    url2 = f"https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
     payload2 = {"directUrls": [f"https://www.instagram.com/{clean_user}/"], "resultsType": "details", "resultsLimit": 1}
     try:
-        items2 = await loop.run_in_executor(None, _sync_post_json, url2, payload2, 15)
+        items2 = await loop.run_in_executor(None, _sync_run_actor_item, "apify~instagram-scraper", payload2, 15, 20)
         if isinstance(items2, list) and len(items2) > 0:
             data = items2[0]
             if isinstance(data, dict) and (data.get("username") or data.get("followersCount") is not None or data.get("fullName")):
@@ -442,23 +531,16 @@ async def try_facebook_api(identifier):
             cached_data.pop("_ts", None)
             return cached_data
 
-    token = (
-        os.getenv("APIFY_API_TOKEN") or
-        os.getenv("APIFY_TOKEN") or
-        os.getenv("APIFY_KEY") or
-        os.getenv("FB_API_TOKEN") or
-        DEFAULT_APIFY_TOKEN
-    )
-    if not token:
+    tokens = get_apify_tokens()
+    if not tokens:
         return None
 
     loop = asyncio.get_running_loop()
     target_url = f"https://www.facebook.com/{clean_id}"
-    url = f"https://api.apify.com/v2/acts/apify~facebook-pages-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
     payload = {"startUrls": [{"url": target_url}], "maxItems": 1}
 
     try:
-        items = await loop.run_in_executor(None, _sync_post_json, url, payload, 15)
+        items = await loop.run_in_executor(None, _sync_run_actor_item, "apify~facebook-pages-scraper", payload, 15, 20)
         if isinstance(items, list) and len(items) > 0:
             item = items[0]
             if isinstance(item, dict) and (item.get("title") or item.get("pageName")):
