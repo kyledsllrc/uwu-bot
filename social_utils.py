@@ -452,11 +452,11 @@ async def try_tiktok_api(username):
 
     profile_url = f"https://www.tiktok.com/@{clean_user}"
 
-    # Try actor 1: clockworks~tiktok-profile-scraper
-    url1 = f"https://api.apify.com/v2/acts/clockworks~tiktok-profile-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
-    payload1 = {"profiles": [profile_url]}
+    # Primary actor: clockworks~tiktok-scraper
+    url1 = f"https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
+    payload1 = {"profiles": [profile_url], "resultsPerPage": 1}
     try:
-        items = await loop.run_in_executor(None, _sync_post_json, url1, payload1, 20)
+        items = await loop.run_in_executor(None, _sync_post_json, url1, payload1, 15)
         if isinstance(items, list) and len(items) > 0:
             item = items[0]
             if isinstance(item, dict) and "authorMeta" in item:
@@ -468,13 +468,13 @@ async def try_tiktok_api(username):
                     _save_disk_cache()
                     return res
     except Exception as exc:
-        print(f"Apify TikTok actor 1 failed: {exc}")
+        print(f"Apify TikTok primary actor failed: {exc}")
 
-    # Fallback actor 2: clockworks~tiktok-scraper
-    url2 = f"https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
-    payload2 = {"profiles": [profile_url], "resultsPerPage": 1}
+    # Fallback actor: clockworks~tiktok-profile-scraper
+    url2 = f"https://api.apify.com/v2/acts/clockworks~tiktok-profile-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
+    payload2 = {"profiles": [profile_url]}
     try:
-        items2 = await loop.run_in_executor(None, _sync_post_json, url2, payload2, 20)
+        items2 = await loop.run_in_executor(None, _sync_post_json, url2, payload2, 15)
         if isinstance(items2, list) and len(items2) > 0:
             item2 = items2[0]
             if isinstance(item2, dict) and "authorMeta" in item2:
@@ -486,6 +486,6 @@ async def try_tiktok_api(username):
                     _save_disk_cache()
                     return res
     except Exception as exc:
-        print(f"Apify TikTok actor 2 failed: {exc}")
+        print(f"Apify TikTok fallback actor failed: {exc}")
 
     return None
