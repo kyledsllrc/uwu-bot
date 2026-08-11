@@ -2997,7 +2997,7 @@ async def ig_cmd(ctx, identifier: str):
                 html, status = await social_utils.fetch_html(url)
                 if not html:
                     status_text = f"HTTP {status}" if status else "network error"
-                    has_token = bool(os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("APIFY_KEY") or os.getenv("IG_API_TOKEN"))
+                    has_token = bool(os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("APIFY_KEY") or os.getenv("IG_API_TOKEN") or getattr(social_utils, "DEFAULT_APIFY_TOKEN", None))
                     token_tip = "" if has_token else "\n💡 **Tip**: Set `APIFY_API_TOKEN` environment variable to use Apify for Instagram lookups."
                     return await ctx.send(
                         f"❌ Could not fetch Instagram profile for **@{username}**. Instagram blocked the request ({status_text}).{token_tip}"
@@ -12077,25 +12077,11 @@ async def play_next_track(guild_id: str):
         vol = state.get("volume", 0.5)
         player = None
 
-        # Try high-performance FFmpegOpusAudio first if volume is 1.0 (avoids CPU re-encoding overhead across multiple servers)
-        if vol == 1.0:
-            try:
-                player = await discord.FFmpegOpusAudio.from_probe(
-                    stream_url,
-                    before_options=FFMPEG_OPTIONS["before_options"],
-                    options=FFMPEG_OPTIONS["options"]
-                )
-            except Exception as probe_err:
-                print(f"FFmpegOpusAudio probe fallback: {probe_err}")
+        def create_pcm_player():
+            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+            return discord.PCMVolumeTransformer(source, volume=vol)
 
-        if player is None:
-            def create_pcm_player():
-                source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-                if vol != 1.0:
-                    return discord.PCMVolumeTransformer(source, volume=vol)
-                return source
-
-            player = await asyncio.to_thread(create_pcm_player)
+        player = await asyncio.to_thread(create_pcm_player)
 
         def after_play(error):
             if error:

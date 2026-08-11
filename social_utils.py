@@ -14,6 +14,8 @@ _CACHE_TTL = 300  # seconds
 _DISK_CACHE_FILE = "social_cache.json"
 _DISK_CACHE = {}
 
+DEFAULT_APIFY_TOKEN = "apify_api_i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN"
+
 
 def _load_disk_cache():
     try:
@@ -328,7 +330,13 @@ def _sync_post_json(url, payload, timeout=30):
 
 async def try_instagram_api(username):
     """Attempt to use Apify API (APIFY_API_TOKEN / APIFY_TOKEN) or IG_API_TOKEN if credentials are available."""
-    token = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("APIFY_KEY") or os.getenv("IG_API_TOKEN")
+    token = (
+        os.getenv("APIFY_API_TOKEN") or
+        os.getenv("APIFY_TOKEN") or
+        os.getenv("APIFY_KEY") or
+        os.getenv("IG_API_TOKEN") or
+        DEFAULT_APIFY_TOKEN
+    )
     if not token:
         return None
 
