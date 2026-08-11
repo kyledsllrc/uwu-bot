@@ -14,7 +14,6 @@ def keep_alive(): return "UwU Bot is alive & running!", 200
 # ==============================================
 import discord
 from discord.ext import commands, tasks
-import requests
 import random, json, time, os, asyncio, socket, uuid, re, traceback, hashlib
 import aiohttp
 from html import unescape
@@ -413,6 +412,7 @@ DEFAULT_ECONOMY_SETTINGS = {
     "jackpot": 10_000,
     "max_bet_percent": 25.0,
     "bet_cap_enabled": True,
+    "claim_reward": 500_000_000_000,
 }
 
 def load_economy_settings():
@@ -424,6 +424,10 @@ def load_economy_settings():
             legacy_cap_settings = "bet_cap_enabled" not in stored
             try:
                 settings["jackpot"] = max(0, int(stored.get("jackpot", settings["jackpot"])))
+            except (TypeError, ValueError):
+                pass
+            try:
+                settings["claim_reward"] = max(0, int(stored.get("claim_reward", settings["claim_reward"])))
             except (TypeError, ValueError):
                 pass
             if legacy_cap_settings:
@@ -2966,24 +2970,31 @@ async def ig_cmd(ctx, identifier: str):
     await ctx.channel.trigger_typing()
     # Try API lookup if configured
     counts = {}
-    api_result = await social_utils.try_instagram_api(username)
-    image = None
+    full_profile = {}
     raw = None
-    if api_result:
-        counts = api_result
+    api_result = await social_utils.try_instagram_api(username)
+    if api_result and isinstance(api_result, dict):
+        full_profile = api_result
+        counts = {
+            k: api_result.get(k)
+            for k in ('followers', 'following', 'posts')
+            if api_result.get(k) is not None
+        }
+        raw = api_result.get('biography')
     else:
         html, status = await social_utils.fetch_html(url)
         if not html:
             status_text = f"HTTP {status}" if status else "network error"
+            has_token = bool(os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("IG_API_TOKEN"))
+            token_tip = "" if has_token else "\n💡 **Tip**: Set `APIFY_API_TOKEN` environment variable to use Apify for Instagram lookups."
             return await ctx.send(
-                f"Could not fetch Instagram profile. Instagram blocked the request or returned {status_text}."
+                f"❌ Could not fetch Instagram profile for **@{username}**. Instagram blocked the request ({status_text}).{token_tip}"
             )
         image = social_utils.extract_og_meta(html, 'og:image')
         desc = social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
         raw = desc
         # Try structured JSON first, but fall back to regex-based extractor
         shared = social_utils.extract_window_shared_data(html) or social_utils.extract_json_ld(html)
-        full_profile = {}
         if shared:
             try:
                 full_profile = social_utils.get_instagram_profile_from_shared_data(shared) or {}
@@ -12073,6 +12084,7 @@ def get_user(uid):
             "wallet": 0,
             "bank": 0,
             "last_daily": 0,
+            "last_claim": 0,
             "last_hunt": 0,
             "hunt_level": 1,
             "hunt_total": 0,
@@ -17104,6 +17116,89 @@ Daily amount: {format_coins(base)} × {user['streak']}
 Total added: **{format_coins(total)} uwuncy**
 Next streak reward scales with your streak.""")
 
+
+@bot.command(name="claim")
+async def claim_cmd(ctx):
+    """Claim daily reward (500,000,000,000 uwuncy by default, 24-hour cooldown)."""
+    user = get_user(ctx.author.id)
+    now = time.time()
+    last_claim = user.get("last_claim", 0)
+    diff = now - last_claim
+
+    if diff < 86400:
+        remaining = int(86400 - diff)
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        seconds = remaining % 60
+        return await ctx.send(
+            f"⏳ **{ctx.author.display_name}**, you have already claimed your daily reward!\n"
+            f"Please wait **{hours}h {minutes}m {seconds}s** before claiming again."
+        )
+
+    reward = ECONOMY_SETTINGS.get("claim_reward", 500_000_000_000)
+    user["last_claim"] = now
+    credit_wallet(user, reward)
+    add_history(user, {
+        "type": "claim",
+        "result": "reward",
+        "bet": 0,
+        "amount": reward,
+    })
+    save_data(DATA)
+
+    embed = discord.Embed(
+        title="🎁 Daily Claim Success!",
+        description=(
+            f"Successfully claimed **{format_coins(reward)}** uwuncy!\n"
+            f"💰 **New Wallet Balance:** `{format_coins(user['wallet'])}` uwuncy"
+        ),
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="You can claim again in 24 hours.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="claimamount", aliases=["setclaim", "claiminfo", "setclaimamount"])
+async def claim_amount_cmd(ctx, amount_text: str = None):
+    """Owner command to view/set daily claim reward amount and view claim usage count."""
+    if not is_owner(ctx):
+        return await ctx.send("❌ **Owner only command!**")
+
+    claimed_users_count = sum(1 for uid, udata in DATA.items() if isinstance(udata, dict) and udata.get("last_claim", 0) > 0)
+    total_users_count = len([uid for uid, udata in DATA.items() if isinstance(udata, dict)])
+    current_reward = ECONOMY_SETTINGS.get("claim_reward", 500_000_000_000)
+
+    if amount_text is None:
+        embed = discord.Embed(
+            title="⚙️ Daily Claim Settings & Stats",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(
+            name="💵 Claim Reward Amount",
+            value=f"**{format_coins(current_reward)}** uwuncy",
+            inline=False
+        )
+        embed.add_field(
+            name="📊 Claim Usage Statistics",
+            value=f"↳ **Users who have claimed**: `{claimed_users_count:,}` of `{total_users_count:,}` users",
+            inline=False
+        )
+        embed.set_footer(text="To update amount, use: uwu setclaim <amount>")
+        return await ctx.send(embed=embed)
+
+    new_amount = parse_coins(amount_text)
+    if new_amount is None or new_amount < 0:
+        return await ctx.send("❌ Invalid amount. Example: `uwu setclaim 500000000000` or `500b`.")
+
+    ECONOMY_SETTINGS["claim_reward"] = new_amount
+    save_economy_settings()
+
+    await ctx.send(
+        f"✅ **Daily claim reward updated!**\n"
+        f"Users will now receive **{format_coins(new_amount)}** uwuncy when they type `uwu claim`.\n"
+        f"📊 **Claimed users so far**: `{claimed_users_count:,}` / `{total_users_count:,}`"
+    )
+
 # ==============================================
 # 📊 ALL OTHER COMMANDS
 # ==============================================
@@ -21538,6 +21633,7 @@ async def help_cmd(ctx, category: str = None):
             "title": "Economy",
             "aliases": ["econ", "wallet", "bank"],
             "items": [
+                ("claim", ""),
                 ("daily", ""),
                 ("money", "bal / balance"),
                 ("info", "userinfo"),
@@ -21639,6 +21735,7 @@ async def help_cmd(ctx, category: str = None):
             "title": "Admin",
             "aliases": ["owner", "admin"],
             "items": [
+                ("setclaim", "claimamount / claiminfo"),
                 ("economystats", "economy / econ"),
                 ("cryptocontrol", "cryptoset / cryptoadmin"),
                 ("cryptopause", "marketpause"),
@@ -22374,120 +22471,3 @@ def start_keep_alive():
 if __name__ == "__main__":
     start_keep_alive()
     run_bot()
-# ==============================================
-# 🔑 APIFY CONFIG — ALREADY SET UP FOR YOU!
-# ==============================================
-APIFY_TOKEN = "apify_api_i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN"
-APIFY_ACTOR_ID = "apify~instagram-scraper"  # Correct format: ~ not /
-API_TIMEOUT = 60  # Instagram scraping takes time
-
-@bot.command(name="ig", help="uwu ig <username> — Get Instagram profile details")
-async def ig(ctx, *, username: str):
-    """
-    Usage: uwu ig <username>
-    Example: uwu ig _kyledsllrc
-    """
-    # Clean input — remove @, commas, spaces
-    clean_username = username.replace("@", "").replace(",", "").strip().lower()
-
-    if not clean_username or " " in clean_username:
-        await ctx.send("❌ **Usage:** `uwu ig username`\nExample: `uwu ig _kyledsllrc`")
-        return
-
-    status = await ctx.send(f"🔍 Fetching `@{clean_username}`... (may take 5-15 sec)")
-
-    # ✅ CORRECT APIFY API ENDPOINT — verified from official docs[[__LINK_ICON]](https://apify.com/rupom888/instagram-scraper-js/api?f_link_type=f_linkinlinenote&flow_extra=eyJpbmxpbmVfZGlzcGxheV9wb3NpdGlvbiI6MCwiZG9jX3Bvc2l0aW9uIjowLCJkb2NfaWQiOiJmMmIyYjY0NGZlYjVjOWU0LTU4NGIyNDgyOGY3OTk1NTkifQ%3D%3D "__LINK_ICON")
-    # Using run-sync-get-dataset-items → returns data directly
-    url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items?token={APIFY_TOKEN}"
-
-    # ✅ CORRECT PAYLOAD format[[__LINK_ICON]](https://apify.com/apidojo/instagram-scraper-api?f_link_type=f_linkinlinenote&flow_extra=eyJpbmxpbmVfZGlzcGxheV9wb3NpdGlvbiI6MCwiZG9jX3Bvc2l0aW9uIjowLCJkb2NfaWQiOiIyNDYyMjY1Y2I4MDU3ZTQxLTc2ODYxMDhkOGUwMzMwZjAifQ%3D%3D "__LINK_ICON")
-    payload = {
-        "usernames": [clean_username],
-        "resultsLimit": 1,
-        "searchType": "user",
-        "resultsType": "details"
-    }
-
-    try:
-        # ✅ Send request
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=API_TIMEOUT,
-            headers={"Content-Type": "application/json"}
-        )
-
-        # ✅ Check HTTP status FIRST before parsing
-        if response.status_code == 401:
-            await status.edit(content="❌ **Apify Token Invalid/Expired!** Check your token at apify.com/settings/tokens")
-            return
-        elif response.status_code == 403:
-            await status.edit(content="❌ **Rate Limited / No Credits!** Apify credits exhausted or blocked.")
-            return
-        elif response.status_code == 429:
-            await status.edit(content="⚠️ **Too many requests!** Wait a minute and try again.")
-            return
-        elif response.status_code != 200:
-            await status.edit(content=f"⚠️ **Apify Error** — Status: `{response.status_code}`")
-            print(f"Response text: {response.text[:500]}")
-            return
-
-        # ✅ SAFE JSON PARSE — NO MORE CRASHES ON LINE 22412!
-        try:
-            data = response.json()
-        except Exception as json_err:
-            print(f"❌ JSON Parse Error: {json_err}")
-            print(f"Raw Response: {response.text[:800]}")
-            await status.edit(content="❌ Failed to read data from Apify. Try again later.")
-            return
-
-        # ✅ Validate response data
-        if not isinstance(data, list) or len(data) == 0:
-            await status.edit(content="❌ **Profile not found, private, or Instagram blocked the request.**")
-            return
-
-        profile = data[0]
-
-        # ✅ Extract fields safely with fallbacks
-        full_name = profile.get("fullName", clean_username)
-        bio = profile.get("biography", "No bio provided.")
-        profile_pic = profile.get("profilePicUrl")
-        followers = profile.get("followersCount", 0)
-        following = profile.get("followsCount", 0)
-        posts = profile.get("postsCount", 0)
-        is_verified = profile.get("isVerified", False)
-        is_private = profile.get("isPrivate", False)
-        username_final = profile.get("username", clean_username)
-
-        # ✅ Build beautiful embed
-        embed = discord.Embed(
-            title=f"📸 @{username_final}" + (" ✅ Verified" if is_verified else ""),
-            url=f"https://instagram.com/{username_final}",
-            description=bio if bio else "No bio",
-            color=0xE1306C  # Instagram pink
-        )
-
-        if profile_pic:
-            embed.set_thumbnail(url=profile_pic)
-
-        embed.add_field(name="👥 Followers", value=f"{followers:,}", inline=True)
-        embed.add_field(name="🔄 Following", value=f"{following:,}", inline=True)
-        embed.add_field(name="📸 Posts", value=f"{posts:,}", inline=True)
-        embed.add_field(name="🔒 Private", value="✅ Yes" if is_private else "❌ No", inline=True)
-
-        embed.set_footer(
-            text=full_name,
-            icon_url="https://cdn-icons-png.flaticon.com/512/174/174855.png"
-        )
-
-        await status.edit(content="✅ **Profile Found!**", embed=embed)
-
-    except requests.exceptions.Timeout:
-        await status.edit(content="⏰ **Request timed out!** Instagram is slow/blocking requests. Try again in 1 minute.")
-    except requests.exceptions.ConnectionError:
-        await status.edit(content="❌ **No internet / Cannot connect to Apify API.** Check your network.")
-    except Exception as e:
-        print(f"❌ IG Command Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        await status.edit(content="⚠️ **Something went wrong.** Check console for details.")

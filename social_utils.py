@@ -297,14 +297,70 @@ _dummy = get_instagram_counts_from_shared_data  # keep linter quiet
 
 
 async def try_instagram_api(username):
-    """Attempt to use Instagram Graph API if credentials are available.
-    Returns a dict similar to get_instagram_counts_from_html or None if unavailable.
-    """
-    token = os.getenv("IG_API_TOKEN")
+    """Attempt to use Apify API (APIFY_API_TOKEN / APIFY_TOKEN) or IG_API_TOKEN if credentials are available."""
+    token = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("IG_API_TOKEN")
     if not token:
         return None
-    # Placeholder: Instagram Graph API requires Business/Creator accounts and ID mapping.
-    # Here we return None if no implementation/key is present.
+
+    clean_user = username.strip().lstrip("@")
+    if not clean_user:
+        return None
+
+    apify_url = f"https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token={token}"
+    payload = {
+        "usernames": [clean_user],
+        "resultsLimit": 1
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(apify_url, json=payload, timeout=25) as resp:
+                if resp.status == 200:
+                    items = await resp.json()
+                    if isinstance(items, list) and len(items) > 0:
+                        data = items[0]
+                        if isinstance(data, dict):
+                            return {
+                                "username": data.get("username") or clean_user,
+                                "name": data.get("fullName") or data.get("name"),
+                                "biography": data.get("biography") or data.get("bio"),
+                                "followers": str(data["followersCount"]) if data.get("followersCount") is not None else None,
+                                "following": str(data["followsCount"]) if data.get("followsCount") is not None else None,
+                                "posts": str(data["postsCount"]) if data.get("postsCount") is not None else None,
+                                "profile_pic_url": data.get("profilePicUrlHD") or data.get("profilePicUrl"),
+                                "is_verified": bool(data.get("isVerified")),
+                                "is_private": bool(data.get("isPrivate")),
+                                "external_url": data.get("externalUrl") or data.get("website"),
+                            }
+
+            # Fallback to secondary Apify actor endpoint
+            apify_url2 = f"https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items?token={token}"
+            payload2 = {
+                "directUrls": [f"https://www.instagram.com/{clean_user}/"],
+                "resultsType": "details",
+                "resultsLimit": 1
+            }
+            async with session.post(apify_url2, json=payload2, timeout=25) as resp2:
+                if resp2.status == 200:
+                    items2 = await resp2.json()
+                    if isinstance(items2, list) and len(items2) > 0:
+                        data = items2[0]
+                        if isinstance(data, dict):
+                            return {
+                                "username": data.get("username") or clean_user,
+                                "name": data.get("fullName") or data.get("name"),
+                                "biography": data.get("biography") or data.get("bio"),
+                                "followers": str(data["followersCount"]) if data.get("followersCount") is not None else None,
+                                "following": str(data["followsCount"]) if data.get("followsCount") is not None else None,
+                                "posts": str(data["postsCount"]) if data.get("postsCount") is not None else None,
+                                "profile_pic_url": data.get("profilePicUrlHD") or data.get("profilePicUrl"),
+                                "is_verified": bool(data.get("isVerified")),
+                                "is_private": bool(data.get("isPrivate")),
+                                "external_url": data.get("externalUrl") or data.get("website"),
+                            }
+    except Exception as exc:
+        print(f"Apify Instagram lookup failed: {exc}")
+
     return None
 
 
