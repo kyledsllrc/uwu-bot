@@ -22408,8 +22408,8 @@ async def on_message(message):
             # 35-second timeout handles proxy rotation delays safely
             response = __req.post(url, json=payload, timeout=35)
 
-            if response.status_code in:
-                data = response.json()
+            if response.status_code in [200, 201, 204]:
+    data = response.json()
 
                 if data and len(data) > 0:
                     profile = data[0]
