@@ -236,7 +236,6 @@ bot_lease_stop = threading.Event()
 FFMPEG_OPTIONS = {
     "before_options": (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
-        "-probesize 10M -analyzeduration 10M "
         "-user_agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
     ),
     "options": "-vn -ar 48000 -ac 2 -loglevel error",
@@ -254,8 +253,7 @@ YTDL_OPTIONS = {
     "cachedir": False,
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "web"],
-            "skip": ["dash", "hls"]
+            "player_client": ["mweb", "ios", "android"]
         }
     }
 }
@@ -3050,8 +3048,16 @@ async def ig_cmd(ctx, identifier: str):
             if avatar_url:
                 embed.set_thumbnail(url=avatar_url)
 
+            desc_parts = []
             if raw:
-                embed.description = (raw[:1900] + '...') if len(raw) > 1900 else raw
+                desc_parts.append(raw)
+            if full_profile.get('external_url'):
+                ext_url = full_profile['external_url']
+                desc_parts.append(f"🔗 [{ext_url}]({ext_url})")
+
+            if desc_parts:
+                desc_text = "\n".join(desc_parts)
+                embed.description = (desc_text[:1900] + '...') if len(desc_text) > 1900 else desc_text
 
             def fmt_num(val):
                 if val is None:
