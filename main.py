@@ -2967,78 +2967,81 @@ async def ig_cmd(ctx, identifier: str):
         if parts:
             username = parts[-1]
     url = f"https://www.instagram.com/{username}/"
-    await ctx.channel.trigger_typing()
-    # Try API lookup if configured
-    counts = {}
-    full_profile = {}
-    raw = None
-    api_result = await social_utils.try_instagram_api(username)
-    if api_result and isinstance(api_result, dict):
-        full_profile = api_result
-        counts = {
-            k: api_result.get(k)
-            for k in ('followers', 'following', 'posts')
-            if api_result.get(k) is not None
-        }
-        raw = api_result.get('biography')
-    else:
-        html, status = await social_utils.fetch_html(url)
-        if not html:
-            status_text = f"HTTP {status}" if status else "network error"
-            has_token = bool(os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("IG_API_TOKEN"))
-            token_tip = "" if has_token else "\n💡 **Tip**: Set `APIFY_API_TOKEN` environment variable to use Apify for Instagram lookups."
-            return await ctx.send(
-                f"❌ Could not fetch Instagram profile for **@{username}**. Instagram blocked the request ({status_text}).{token_tip}"
-            )
-        image = social_utils.extract_og_meta(html, 'og:image')
-        desc = social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
-        raw = desc
-        # Try structured JSON first, but fall back to regex-based extractor
-        shared = social_utils.extract_window_shared_data(html) or social_utils.extract_json_ld(html)
-        if shared:
-            try:
-                full_profile = social_utils.get_instagram_profile_from_shared_data(shared) or {}
+    try:
+        async with ctx.typing():
+            # Try API lookup if configured
+            counts = {}
+            full_profile = {}
+            raw = None
+            api_result = await social_utils.try_instagram_api(username)
+            if api_result and isinstance(api_result, dict):
+                full_profile = api_result
                 counts = {
-                    k: full_profile.get(k)
+                    k: api_result.get(k)
                     for k in ('followers', 'following', 'posts')
-                    if full_profile.get(k) is not None
+                    if api_result.get(k) is not None
                 }
-            except Exception:
-                full_profile = {}
-                counts = {}
-        if not counts:
-            counts = social_utils.get_instagram_counts_from_html(html) or {}
-        if not counts:
-            counts = social_utils.parse_counts_from_description(desc)
-        if not full_profile:
-            full_profile = social_utils.get_instagram_profile_from_html(html) or {}
-        if not raw:
-            raw = full_profile.get('biography')
-    embed = discord.Embed(title=f"Instagram — @{username}", url=url, color=discord.Color.blue())
-    if full_profile.get('profile_pic_url'):
-        embed.set_thumbnail(url=full_profile['profile_pic_url'])
-    if full_profile.get('name'):
-        embed.add_field(name='Name', value=full_profile['name'], inline=True)
-    if full_profile.get('category_name'):
-        embed.add_field(name='Category', value=full_profile['category_name'], inline=True)
-    if full_profile.get('is_verified'):
-        embed.add_field(name='Verified', value='Yes', inline=True)
-    if full_profile.get('is_private'):
-        embed.add_field(name='Private', value='Yes', inline=True)
-    else:
-        embed.add_field(name='Private', value='No', inline=True)
-    if counts.get('followers'):
-        embed.add_field(name='Followers', value=counts['followers'], inline=True)
-    if counts.get('following'):
-        embed.add_field(name='Following', value=counts['following'], inline=True)
-    if counts.get('posts'):
-        embed.add_field(name='Posts', value=counts['posts'], inline=True)
-    if full_profile.get('external_url'):
-        embed.add_field(name='Website', value=full_profile['external_url'], inline=False)
-    if raw:
-        embed.description = (raw[:1900] + '...') if len(raw) > 1900 else raw
-    embed.set_footer(text='Public Instagram profile data only')
-    await ctx.send(embed=embed)
+                raw = api_result.get('biography')
+            else:
+                html, status = await social_utils.fetch_html(url)
+                if not html:
+                    status_text = f"HTTP {status}" if status else "network error"
+                    has_token = bool(os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or os.getenv("APIFY_KEY") or os.getenv("IG_API_TOKEN"))
+                    token_tip = "" if has_token else "\n💡 **Tip**: Set `APIFY_API_TOKEN` environment variable to use Apify for Instagram lookups."
+                    return await ctx.send(
+                        f"❌ Could not fetch Instagram profile for **@{username}**. Instagram blocked the request ({status_text}).{token_tip}"
+                    )
+                image = social_utils.extract_og_meta(html, 'og:image')
+                desc = social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
+                raw = desc
+                # Try structured JSON first, but fall back to regex-based extractor
+                shared = social_utils.extract_window_shared_data(html) or social_utils.extract_json_ld(html)
+                if shared:
+                    try:
+                        full_profile = social_utils.get_instagram_profile_from_shared_data(shared) or {}
+                        counts = {
+                            k: full_profile.get(k)
+                            for k in ('followers', 'following', 'posts')
+                            if full_profile.get(k) is not None
+                        }
+                    except Exception:
+                        full_profile = {}
+                        counts = {}
+                if not counts:
+                    counts = social_utils.get_instagram_counts_from_html(html) or {}
+                if not counts:
+                    counts = social_utils.parse_counts_from_description(desc)
+                if not full_profile:
+                    full_profile = social_utils.get_instagram_profile_from_html(html) or {}
+                if not raw:
+                    raw = full_profile.get('biography')
+            embed = discord.Embed(title=f"Instagram — @{username}", url=url, color=discord.Color.blue())
+            if full_profile.get('profile_pic_url'):
+                embed.set_thumbnail(url=full_profile['profile_pic_url'])
+            if full_profile.get('name'):
+                embed.add_field(name='Name', value=full_profile['name'], inline=True)
+            if full_profile.get('category_name'):
+                embed.add_field(name='Category', value=full_profile['category_name'], inline=True)
+            if full_profile.get('is_verified'):
+                embed.add_field(name='Verified', value='Yes', inline=True)
+            if full_profile.get('is_private'):
+                embed.add_field(name='Private', value='Yes', inline=True)
+            else:
+                embed.add_field(name='Private', value='No', inline=True)
+            if counts.get('followers'):
+                embed.add_field(name='Followers', value=counts['followers'], inline=True)
+            if counts.get('following'):
+                embed.add_field(name='Following', value=counts['following'], inline=True)
+            if counts.get('posts'):
+                embed.add_field(name='Posts', value=counts['posts'], inline=True)
+            if full_profile.get('external_url'):
+                embed.add_field(name='Website', value=full_profile['external_url'], inline=False)
+            if raw:
+                embed.description = (raw[:1900] + '...') if len(raw) > 1900 else raw
+            embed.set_footer(text='Public Instagram profile data only')
+            await ctx.send(embed=embed)
+    except Exception as exc:
+        print(f"Error in ig_cmd: {exc}")
 
 
 @bot.command(name='tt', aliases=[',tt'])
@@ -3059,47 +3062,51 @@ async def tt_cmd(ctx, identifier: str):
             # last part may be username or user page
             username = parts[-1].lstrip('@')
     url = f"https://www.tiktok.com/@{username}"
-    await ctx.channel.trigger_typing()
-    # Try API lookup first
-    api_result = await social_utils.try_tiktok_api(username)
+    profile = {}
     image = None
     desc = None
     counts = {}
-    if api_result:
-        counts = api_result
-    else:
-        html, status = await social_utils.fetch_html(url)
-        if not html:
-            status_text = f"HTTP {status}" if status else "network error"
-            return await ctx.send(
-                f"Could not fetch TikTok profile. TikTok blocked the request or returned {status_text}."
-            )
-        profile = social_utils.get_tiktok_profile_from_html(html)
-        image = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image')
-        desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
-        counts = {
-            k: profile.get(k)
-            for k in ('followers', 'posts')
-            if profile.get(k) is not None
-        }
-    embed = discord.Embed(title=f"TikTok — @{username}", url=url, color=discord.Color.red())
-    if image:
-        embed.set_thumbnail(url=image)
-    if profile.get('name'):
-        embed.add_field(name='Name', value=profile['name'], inline=True)
-    if profile.get('followers'):
-        embed.add_field(name='Followers', value=profile['followers'], inline=True)
-    if profile.get('posts'):
-        embed.add_field(name='Videos', value=profile['posts'], inline=True)
-    if profile.get('is_verified'):
-        embed.add_field(name='Verified', value='Yes', inline=True)
-    for k, v in counts.items():
-        if k not in {'followers', 'posts'}:
-            embed.add_field(name=k.capitalize(), value=v, inline=True)
-    if desc:
-        embed.description = (desc[:1900] + '...') if len(desc) > 1900 else desc
-    embed.set_footer(text='Public TikTok profile data only')
-    await ctx.send(embed=embed)
+    try:
+        async with ctx.typing():
+            # Try API lookup first
+            api_result = await social_utils.try_tiktok_api(username)
+            if api_result:
+                counts = api_result
+            else:
+                html, status = await social_utils.fetch_html(url)
+                if not html:
+                    status_text = f"HTTP {status}" if status else "network error"
+                    return await ctx.send(
+                        f"Could not fetch TikTok profile. TikTok blocked the request or returned {status_text}."
+                    )
+                profile = social_utils.get_tiktok_profile_from_html(html)
+                image = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image')
+                desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
+                counts = {
+                    k: profile.get(k)
+                    for k in ('followers', 'posts')
+                    if profile.get(k) is not None
+                }
+            embed = discord.Embed(title=f"TikTok — @{username}", url=url, color=discord.Color.red())
+            if image:
+                embed.set_thumbnail(url=image)
+            if profile.get('name'):
+                embed.add_field(name='Name', value=profile['name'], inline=True)
+            if profile.get('followers'):
+                embed.add_field(name='Followers', value=profile['followers'], inline=True)
+            if profile.get('posts'):
+                embed.add_field(name='Videos', value=profile['posts'], inline=True)
+            if profile.get('is_verified'):
+                embed.add_field(name='Verified', value='Yes', inline=True)
+            for k, v in counts.items():
+                if k not in {'followers', 'posts'}:
+                    embed.add_field(name=k.capitalize(), value=v, inline=True)
+            if desc:
+                embed.description = (desc[:1900] + '...') if len(desc) > 1900 else desc
+            embed.set_footer(text='Public TikTok profile data only')
+            await ctx.send(embed=embed)
+    except Exception as exc:
+        print(f"Error in tt_cmd: {exc}")
 
 
 @bot.command(name='fb', aliases=[',fb'])
@@ -3121,46 +3128,50 @@ async def fb_cmd(ctx, identifier: str):
         url = link
     else:
         url = f"https://m.facebook.com/{link}"
-    await ctx.channel.trigger_typing()
-    api_result = await social_utils.try_facebook_api(identifier)
+    profile = {}
     image = None
     desc = None
     counts = {}
-    if api_result:
-        counts = api_result
-    else:
-        html, status = await social_utils.fetch_html(url)
-        if not html:
-            status_text = f"HTTP {status}" if status else "network error"
-            return await ctx.send(
-                f"Could not fetch Facebook page. Facebook blocked the request or returned {status_text}."
-            )
-        profile = social_utils.get_facebook_profile_from_html(html)
-        image = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image')
-        desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
-        if profile.get('followers'):
-            counts['followers'] = profile['followers']
-        if profile.get('likes'):
-            counts['likes'] = profile['likes']
-        if profile.get('url'):
-            url = profile['url']
-    title_name = profile.get('name') or identifier
-    embed = discord.Embed(title=f"Facebook — {title_name}", url=url, color=discord.Color.dark_blue())
-    if image:
-        embed.set_thumbnail(url=image)
-    if profile.get('name'):
-        embed.add_field(name='Name', value=profile['name'], inline=True)
-    if profile.get('followers'):
-        embed.add_field(name='Followers', value=profile['followers'], inline=True)
-    if profile.get('likes'):
-        embed.add_field(name='Likes', value=profile['likes'], inline=True)
-    for k, v in counts.items():
-        if k not in {'followers', 'likes'}:
-            embed.add_field(name=k.capitalize(), value=v, inline=True)
-    if desc:
-        embed.description = (desc[:1900] + '...') if len(desc) > 1900 else desc
-    embed.set_footer(text='Public Facebook page data only')
-    await ctx.send(embed=embed)
+    try:
+        async with ctx.typing():
+            api_result = await social_utils.try_facebook_api(identifier)
+            if api_result:
+                counts = api_result
+            else:
+                html, status = await social_utils.fetch_html(url)
+                if not html:
+                    status_text = f"HTTP {status}" if status else "network error"
+                    return await ctx.send(
+                        f"Could not fetch Facebook page. Facebook blocked the request or returned {status_text}."
+                    )
+                profile = social_utils.get_facebook_profile_from_html(html)
+                image = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image')
+                desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
+                if profile.get('followers'):
+                    counts['followers'] = profile['followers']
+                if profile.get('likes'):
+                    counts['likes'] = profile['likes']
+                if profile.get('url'):
+                    url = profile['url']
+            title_name = profile.get('name') or identifier
+            embed = discord.Embed(title=f"Facebook — {title_name}", url=url, color=discord.Color.dark_blue())
+            if image:
+                embed.set_thumbnail(url=image)
+            if profile.get('name'):
+                embed.add_field(name='Name', value=profile['name'], inline=True)
+            if profile.get('followers'):
+                embed.add_field(name='Followers', value=profile['followers'], inline=True)
+            if profile.get('likes'):
+                embed.add_field(name='Likes', value=profile['likes'], inline=True)
+            for k, v in counts.items():
+                if k not in {'followers', 'likes'}:
+                    embed.add_field(name=k.capitalize(), value=v, inline=True)
+            if desc:
+                embed.description = (desc[:1900] + '...') if len(desc) > 1900 else desc
+            embed.set_footer(text='Public Facebook page data only')
+            await ctx.send(embed=embed)
+    except Exception as exc:
+        print(f"Error in fb_cmd: {exc}")
 
 
 async def _music_play_next(ctx, guild_id: str):
