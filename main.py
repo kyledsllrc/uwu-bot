@@ -3199,6 +3199,57 @@ async def fb_cmd(ctx, identifier: str):
         print(f"Error in fb_cmd: {exc}")
 
 
+@bot.command(name='apify', aliases=[',apify', 'apifybalance', ',apifybalance', 'apifystats', ',apifystats'])
+async def apify_cmd(ctx):
+    """Check remaining balance and monthly usage for all configured Apify tokens."""
+    try:
+        async with ctx.typing():
+            loop = asyncio.get_running_loop()
+            stats = await loop.run_in_executor(None, social_utils.check_apify_balances)
+            if not stats:
+                return await ctx.send("❌ No Apify tokens found or configured.")
+
+            embed = discord.Embed(
+                title="⚡ Apify Accounts & Token Balances",
+                description="Status and remaining monthly balance across all configured accounts:",
+                color=discord.Color.blue()
+            )
+
+            total_remaining = 0.0
+            total_spent = 0.0
+            total_limit = 0.0
+
+            for item in stats:
+                idx = item["index"]
+                uname = item["username"]
+                token = item["masked_token"]
+                status = item["status"]
+                spent = item["spent_usd"]
+                limit = item["limit_usd"]
+                rem = item["remaining_usd"]
+
+                total_spent += spent
+                total_limit += limit
+                total_remaining += rem
+
+                icon = "🟢" if "ACTIVE" in status else "🔴"
+                val = f"👤 **Account**: @{uname}\n" \
+                      f"🔑 **Key**: `{token}`\n" \
+                      f"💰 **Spent**: `${spent:.4f}` / `${limit:.2f}`\n" \
+                      f"💵 **Remaining**: `${rem:.4f}`\n" \
+                      f"📌 **Status**: {status}"
+                embed.add_field(name=f"{icon} Account #{idx}", value=val, inline=False)
+
+            embed.set_footer(
+                text=f"Total Balance Available: ${total_remaining:.4f} / ${total_limit:.2f} across {len(stats)} accounts"
+            )
+            await ctx.send(embed=embed)
+    except Exception as exc:
+        print(f"Error in apify_cmd: {exc}")
+        await ctx.send(f"An error occurred while fetching Apify balances: `{exc}`")
+
+
+
 async def _music_play_next(ctx, guild_id: str):
 
     await play_next_track(guild_id)

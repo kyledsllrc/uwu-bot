@@ -364,6 +364,62 @@ def get_apify_tokens():
     return result
 
 
+def check_apify_balances():
+    """Fetch usage, limit, and remaining balance details for all configured Apify tokens."""
+    tokens = get_apify_tokens()
+    stats = []
+    for idx, token in enumerate(tokens, 1):
+        masked = f"...{token[-6:]}" if len(token) >= 6 else token
+        is_exhausted = token in _EXHAUSTED_TOKENS
+        
+        # Default fallback values
+        username = "Unknown"
+        spent_usd = 0.0
+        limit_usd = 5.0
+        status_msg = "EXHAUSTED" if is_exhausted else "ACTIVE"
+        
+        # 1. Fetch user profile
+        user_url = f"https://api.apify.com/v2/users/me?token={token}"
+        try:
+            req_u = urllib.request.Request(user_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req_u, timeout=10) as resp_u:
+                u_data = json.loads(resp_u.read().decode()).get("data", {})
+                username = u_data.get("username") or username
+                limit_usd = float(u_data.get("plan", {}).get("maxMonthlyUsageUsd", 5.0))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 402, 403, 429):
+                status_msg = f"EXHAUSTED (HTTP {exc.code})"
+                _EXHAUSTED_TOKENS.add(token)
+        except Exception:
+            pass
+
+        # 2. Fetch monthly usage
+        usage_url = f"https://api.apify.com/v2/users/me/usage/monthly?token={token}"
+        try:
+            req_m = urllib.request.Request(usage_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req_m, timeout=10) as resp_m:
+                m_data = json.loads(resp_m.read().decode()).get("data", {})
+                spent_usd = float(m_data.get("totalUsageUsd", 0.0))
+        except Exception:
+            pass
+
+        remaining_usd = max(0.0, limit_usd - spent_usd)
+        if remaining_usd <= 0 and not is_exhausted:
+            status_msg = "LIMIT REACHED"
+
+        stats.append({
+            "index": idx,
+            "username": username,
+            "masked_token": masked,
+            "status": status_msg,
+            "spent_usd": spent_usd,
+            "limit_usd": limit_usd,
+            "remaining_usd": remaining_usd,
+            "is_exhausted": is_exhausted,
+        })
+    return stats
+
+
 def _sync_run_actor_item(actor_name, payload, api_timeout=20, req_timeout=25):
     """
     Synchronously post to an Apify actor with automatic token rotation and failover.
