@@ -264,23 +264,6 @@ def get_tiktok_profile_from_html(html):
     return profile
 
 
-def get_facebook_profile_from_html(html):
-    profile = {
-        'profile_pic_url': extract_og_meta(html, 'og:image'),
-        'name': extract_og_meta(html, 'og:title'),
-        'biography': extract_og_meta(html, 'og:description'),
-        'url': extract_og_meta(html, 'og:url'),
-    }
-    if profile['biography']:
-        followers = re.search(r'([\d,\.]+)\s+Followers', profile['biography'], re.I)
-        if followers:
-            profile['followers'] = followers.group(1)
-        likes = re.search(r'([\d,\.]+)\s+Likes', profile['biography'], re.I)
-        if likes:
-            profile['likes'] = likes.group(1)
-    return profile
-
-
 def get_tiktok_counts_from_sig_state(html):
     # Best-effort: look for JSON objects containing 'followers' or 'fans'
     m = re.search(r'(?:window\.__INIT_PROPS__|window\.__INIT_DATA__|<script[^>]+id="SIGI_STATE"[^>]*>)(.*?)</script>', html, re.S | re.I)
@@ -422,17 +405,87 @@ async def try_instagram_api(username):
     return None
 
 
-async def try_facebook_api(identifier):
-    token = os.getenv("FB_API_TOKEN")
-    if not token:
-        return None
-    # Placeholder for Graph API lookup
-    return None
-
-
 async def try_tiktok_api(username):
-    token = os.getenv("TT_API_TOKEN")
+    clean_user = username.strip().lstrip("@")
+    if not clean_user:
+        return None
+
+    # Check cache first for instant response
+    _load_disk_cache()
+    now = time.time()
+    cache_key = f"tt_{clean_user.lower()}"
+    if cache_key in _IG_PROFILE_CACHE:
+        entry = _IG_PROFILE_CACHE[cache_key]
+        if isinstance(entry, dict) and (now - entry.get("_ts", 0)) < _IG_CACHE_TTL:
+            cached_data = dict(entry)
+            cached_data.pop("_ts", None)
+            return cached_data
+
+    token = (
+        os.getenv("APIFY_API_TOKEN") or
+        os.getenv("APIFY_TOKEN") or
+        os.getenv("APIFY_KEY") or
+        os.getenv("TT_API_TOKEN") or
+        DEFAULT_APIFY_TOKEN
+    )
     if not token:
         return None
-    # Placeholder: TikTok API access is not public; leave as None unless configured.
+
+    loop = asyncio.get_running_loop()
+
+    def parse_author_meta(author_dict):
+        if not isinstance(author_dict, dict):
+            return None
+        return {
+            "username": author_dict.get("name") or clean_user,
+            "name": author_dict.get("nickName") or author_dict.get("name") or clean_user,
+            "biography": author_dict.get("signature") or "",
+            "followers": str(author_dict.get("fans", 0)),
+            "following": str(author_dict.get("following", 0)),
+            "posts": str(author_dict.get("video", 0)),
+            "likes": str(author_dict.get("heart", 0)),
+            "profile_pic_url": author_dict.get("avatar") or author_dict.get("originalAvatarUrl"),
+            "is_verified": bool(author_dict.get("verified")),
+            "is_private": bool(author_dict.get("privateAccount")),
+            "external_url": author_dict.get("bioLink") or author_dict.get("bio_url"),
+        }
+
+    profile_url = f"https://www.tiktok.com/@{clean_user}"
+
+    # Try actor 1: clockworks~tiktok-profile-scraper
+    url1 = f"https://api.apify.com/v2/acts/clockworks~tiktok-profile-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
+    payload1 = {"profiles": [profile_url]}
+    try:
+        items = await loop.run_in_executor(None, _sync_post_json, url1, payload1, 20)
+        if isinstance(items, list) and len(items) > 0:
+            item = items[0]
+            if isinstance(item, dict) and "authorMeta" in item:
+                res = parse_author_meta(item["authorMeta"])
+                if res:
+                    cache_entry = dict(res)
+                    cache_entry["_ts"] = now
+                    _IG_PROFILE_CACHE[cache_key] = cache_entry
+                    _save_disk_cache()
+                    return res
+    except Exception as exc:
+        print(f"Apify TikTok actor 1 failed: {exc}")
+
+    # Fallback actor 2: clockworks~tiktok-scraper
+    url2 = f"https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
+    payload2 = {"profiles": [profile_url], "resultsPerPage": 1}
+    try:
+        items2 = await loop.run_in_executor(None, _sync_post_json, url2, payload2, 20)
+        if isinstance(items2, list) and len(items2) > 0:
+            item2 = items2[0]
+            if isinstance(item2, dict) and "authorMeta" in item2:
+                res = parse_author_meta(item2["authorMeta"])
+                if res:
+                    cache_entry = dict(res)
+                    cache_entry["_ts"] = now
+                    _IG_PROFILE_CACHE[cache_key] = cache_entry
+                    _save_disk_cache()
+                    return res
+    except Exception as exc:
+        print(f"Apify TikTok actor 2 failed: {exc}")
+
     return None

@@ -1489,8 +1489,6 @@ def _normalize_category(name: str):
         return "instagram"
     if n in {"tt", "tiktok"}:
         return "tiktok"
-    if n in {"fb", "facebook"}:
-        return "facebook"
     return n
 
 
@@ -1500,7 +1498,7 @@ def is_category_disabled(guild, category: str):
     gid = "global" if guild is None else str(guild.id)
     disabled = set(store.get(gid, []))
     # If overall socials disabled, treat specific socials as disabled
-    if "socials" in disabled and cat in {"instagram", "tiktok", "facebook"}:
+    if "socials" in disabled and cat in {"instagram", "tiktok"}:
         return True
     return cat in disabled
 
@@ -3084,7 +3082,7 @@ async def ig_cmd(ctx, identifier: str):
 
 @bot.command(name='tt', aliases=[',tt'])
 async def tt_cmd(ctx, identifier: str):
-    """Lookup a TikTok profile by username or URL (best-effort)."""
+    """Lookup a TikTok profile by username or URL using Apify scraper."""
     if is_category_disabled(ctx.guild, 'socials') or is_category_disabled(ctx.guild, 'tiktok'):
         who = ctx.author.display_name if ctx.author else f"<@{BOT_OWNER_ID}>"
         embed = discord.Embed(
@@ -3092,24 +3090,37 @@ async def tt_cmd(ctx, identifier: str):
             color=discord.Color.gold(),
         )
         return await ctx.send(embed=embed)
-    username = identifier.strip()
+    username = identifier.strip().lstrip('@')
     if 'tiktok.com' in username:
         parts = re.split(r'[/?#]+', username)
         parts = [p for p in parts if p]
         if parts:
-            # last part may be username or user page
             username = parts[-1].lstrip('@')
     url = f"https://www.tiktok.com/@{username}"
     profile = {}
-    image = None
-    desc = None
+    raw_desc = None
     counts = {}
+
+    def fmt_num(val):
+        if val is None:
+            return "0"
+        val_str = str(val).replace(',', '').strip()
+        if val_str.isdigit():
+            return f"{int(val_str):,}"
+        return str(val)
+
     try:
         async with ctx.typing():
-            # Try API lookup first
             api_result = await social_utils.try_tiktok_api(username)
             if api_result:
-                counts = api_result
+                profile = api_result
+                counts = {
+                    'posts': api_result.get('posts'),
+                    'following': api_result.get('following'),
+                    'followers': api_result.get('followers'),
+                    'likes': api_result.get('likes'),
+                }
+                raw_desc = api_result.get('biography')
             else:
                 html, status = await social_utils.fetch_html(url)
                 if not html:
@@ -3118,98 +3129,62 @@ async def tt_cmd(ctx, identifier: str):
                         f"Could not fetch TikTok profile. TikTok blocked the request or returned {status_text}."
                     )
                 profile = social_utils.get_tiktok_profile_from_html(html)
-                image = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image')
-                desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
                 counts = {
-                    k: profile.get(k)
-                    for k in ('followers', 'posts')
-                    if profile.get(k) is not None
+                    'posts': profile.get('posts'),
+                    'following': profile.get('following'),
+                    'followers': profile.get('followers'),
                 }
-            embed = discord.Embed(title=f"TikTok — @{username}", url=url, color=discord.Color.red())
-            if image:
-                embed.set_thumbnail(url=image)
-            if profile.get('name'):
-                embed.add_field(name='Name', value=profile['name'], inline=True)
-            if profile.get('followers'):
-                embed.add_field(name='Followers', value=profile['followers'], inline=True)
-            if profile.get('posts'):
-                embed.add_field(name='Videos', value=profile['posts'], inline=True)
-            if profile.get('is_verified'):
-                embed.add_field(name='Verified', value='Yes', inline=True)
-            for k, v in counts.items():
-                if k not in {'followers', 'posts'}:
-                    embed.add_field(name=k.capitalize(), value=v, inline=True)
-            if desc:
-                embed.description = (desc[:1900] + '...') if len(desc) > 1900 else desc
-            embed.set_footer(text='Public TikTok profile data only')
+                raw_desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description')
+
+            display_name = profile.get('name') or username
+            is_private = bool(profile.get('is_private'))
+            lock_suffix = " 🔒" if is_private else ""
+
+            if profile.get('name') and profile['name'].lower() != username.lower():
+                title_text = f"{profile['name']} (@{username}){lock_suffix}"
+            else:
+                title_text = f"@{username}{lock_suffix}"
+
+            embed = discord.Embed(
+                title=title_text,
+                url=url,
+                color=discord.Color.from_rgb(43, 45, 49)
+            )
+
+            avatar_url = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image') if 'html' in locals() else profile.get('profile_pic_url')
+            if avatar_url:
+                embed.set_author(name=display_name, icon_url=avatar_url, url=url)
+                embed.set_thumbnail(url=avatar_url)
+            else:
+                embed.set_author(name=display_name, url=url)
+
+            desc_parts = []
+            if raw_desc:
+                desc_parts.append(raw_desc)
+            if profile.get('external_url'):
+                ext_url = profile['external_url']
+                desc_parts.append(f"🔗 [{ext_url}]({ext_url})")
+
+            if desc_parts:
+                desc_text = "\n".join(desc_parts)
+                embed.description = (desc_text[:1900] + '...') if len(desc_text) > 1900 else desc_text
+
+            posts_cnt = fmt_num(counts.get('posts'))
+            following_cnt = fmt_num(counts.get('following'))
+            followers_cnt = fmt_num(counts.get('followers'))
+
+            embed.add_field(name="Posts", value=posts_cnt, inline=True)
+            embed.add_field(name="Following", value=following_cnt, inline=True)
+            embed.add_field(name="Followers", value=followers_cnt, inline=True)
+
+            if counts.get('likes') and str(counts.get('likes')) != "0":
+                embed.add_field(name="Likes", value=fmt_num(counts['likes']), inline=True)
+
+            tt_icon_url = "https://cdn-icons-png.flaticon.com/512/3046/3046124.png"
+            embed.set_footer(text="TikTok", icon_url=tt_icon_url)
             await ctx.send(embed=embed)
     except Exception as exc:
         print(f"Error in tt_cmd: {exc}")
-
-
-@bot.command(name='fb', aliases=[',fb'])
-async def fb_cmd(ctx, identifier: str):
-    """Lookup a Facebook page or profile by URL or username (best-effort)."""
-    if is_category_disabled(ctx.guild, 'socials') or is_category_disabled(ctx.guild, 'facebook'):
-        who = ctx.author.display_name if ctx.author else f"<@{BOT_OWNER_ID}>"
-        embed = discord.Embed(
-            description=f"**Socials have been turned OFF by {who}**",
-            color=discord.Color.gold(),
-        )
-        return await ctx.send(embed=embed)
-    link = identifier.strip()
-    # prefer mobile site which is lighter
-    if 'facebook.com' in link and not link.startswith('http'):
-        link = 'https://' + link
-    if 'facebook.com' in link:
-        # try to use the URL directly
-        url = link
-    else:
-        url = f"https://m.facebook.com/{link}"
-    profile = {}
-    image = None
-    desc = None
-    counts = {}
-    try:
-        async with ctx.typing():
-            api_result = await social_utils.try_facebook_api(identifier)
-            if api_result:
-                counts = api_result
-            else:
-                html, status = await social_utils.fetch_html(url)
-                if not html:
-                    status_text = f"HTTP {status}" if status else "network error"
-                    return await ctx.send(
-                        f"Could not fetch Facebook page. Facebook blocked the request or returned {status_text}."
-                    )
-                profile = social_utils.get_facebook_profile_from_html(html)
-                image = profile.get('profile_pic_url') or social_utils.extract_og_meta(html, 'og:image')
-                desc = profile.get('biography') or social_utils.extract_og_meta(html, 'og:description') or social_utils.extract_og_meta(html, 'description')
-                if profile.get('followers'):
-                    counts['followers'] = profile['followers']
-                if profile.get('likes'):
-                    counts['likes'] = profile['likes']
-                if profile.get('url'):
-                    url = profile['url']
-            title_name = profile.get('name') or identifier
-            embed = discord.Embed(title=f"Facebook — {title_name}", url=url, color=discord.Color.dark_blue())
-            if image:
-                embed.set_thumbnail(url=image)
-            if profile.get('name'):
-                embed.add_field(name='Name', value=profile['name'], inline=True)
-            if profile.get('followers'):
-                embed.add_field(name='Followers', value=profile['followers'], inline=True)
-            if profile.get('likes'):
-                embed.add_field(name='Likes', value=profile['likes'], inline=True)
-            for k, v in counts.items():
-                if k not in {'followers', 'likes'}:
-                    embed.add_field(name=k.capitalize(), value=v, inline=True)
-            if desc:
-                embed.description = (desc[:1900] + '...') if len(desc) > 1900 else desc
-            embed.set_footer(text='Public Facebook page data only')
-            await ctx.send(embed=embed)
-    except Exception as exc:
-        print(f"Error in fb_cmd: {exc}")
 
 
 async def _music_play_next(ctx, guild_id: str):
