@@ -3026,30 +3026,51 @@ async def ig_cmd(ctx, identifier: str):
                     full_profile = social_utils.get_instagram_profile_from_html(html) or {}
                 if not raw:
                     raw = full_profile.get('biography')
-            embed = discord.Embed(title=f"Instagram — @{username}", url=url, color=discord.Color.blue())
-            if full_profile.get('profile_pic_url'):
-                embed.set_thumbnail(url=full_profile['profile_pic_url'])
-            if full_profile.get('name'):
-                embed.add_field(name='Name', value=full_profile['name'], inline=True)
-            if full_profile.get('category_name'):
-                embed.add_field(name='Category', value=full_profile['category_name'], inline=True)
-            if full_profile.get('is_verified'):
-                embed.add_field(name='Verified', value='Yes', inline=True)
-            if full_profile.get('is_private'):
-                embed.add_field(name='Private', value='Yes', inline=True)
+            display_name = full_profile.get('name') or username
+            is_private = bool(full_profile.get('is_private'))
+            lock_suffix = " 🔒" if is_private else ""
+
+            if full_profile.get('name') and full_profile['name'] != username:
+                title_text = f"{full_profile['name']} (@{username}){lock_suffix}"
             else:
-                embed.add_field(name='Private', value='No', inline=True)
-            if counts.get('followers'):
-                embed.add_field(name='Followers', value=counts['followers'], inline=True)
-            if counts.get('following'):
-                embed.add_field(name='Following', value=counts['following'], inline=True)
-            if counts.get('posts'):
-                embed.add_field(name='Posts', value=counts['posts'], inline=True)
-            if full_profile.get('external_url'):
-                embed.add_field(name='Website', value=full_profile['external_url'], inline=False)
+                title_text = f"@{username}{lock_suffix}"
+
+            embed = discord.Embed(
+                title=title_text,
+                url=url,
+                color=discord.Color.from_rgb(43, 45, 49)
+            )
+
+            avatar_url = full_profile.get('profile_pic_url')
+            if avatar_url:
+                embed.set_author(name=display_name, icon_url=avatar_url, url=url)
+            else:
+                embed.set_author(name=display_name, url=url)
+
+            if avatar_url:
+                embed.set_thumbnail(url=avatar_url)
+
             if raw:
                 embed.description = (raw[:1900] + '...') if len(raw) > 1900 else raw
-            embed.set_footer(text='Public Instagram profile data only')
+
+            def fmt_num(val):
+                if val is None:
+                    return "0"
+                val_str = str(val).replace(',', '').strip()
+                if val_str.isdigit():
+                    return f"{int(val_str):,}"
+                return str(val)
+
+            posts_cnt = fmt_num(counts.get('posts'))
+            following_cnt = fmt_num(counts.get('following'))
+            followers_cnt = fmt_num(counts.get('followers'))
+
+            embed.add_field(name="Posts", value=posts_cnt, inline=True)
+            embed.add_field(name="Following", value=following_cnt, inline=True)
+            embed.add_field(name="Followers", value=followers_cnt, inline=True)
+
+            ig_icon_url = "https://cdn-icons-png.flaticon.com/512/174/174855.png"
+            embed.set_footer(text="Instagram", icon_url=ig_icon_url)
             await ctx.send(embed=embed)
     except Exception as exc:
         print(f"Error in ig_cmd: {exc}")
