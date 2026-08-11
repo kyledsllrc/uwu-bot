@@ -234,11 +234,15 @@ BOT_HEARTBEAT_SECONDS = 15
 bot_lease_stop = threading.Event()
 
 FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"",
-    "options": "-vn -loglevel error",
+    "before_options": (
+        "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+        "-probesize 10M -analyzeduration 10M "
+        "-user_agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
+    ),
+    "options": "-vn -ar 48000 -ac 2 -loglevel error",
 }
 YTDL_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio/best",
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
@@ -247,6 +251,13 @@ YTDL_OPTIONS = {
     "nocheckcertificate": True,
     "skip_download": True,
     "source_address": "0.0.0.0",
+    "cachedir": False,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],
+            "skip": ["dash", "hls"]
+        }
+    }
 }
 MUSIC_STATES = {}
 MUSIC_LOCKS = {}
@@ -11861,12 +11872,19 @@ def resolve_apple_music_url(url: str):
     return results
 
 
-async def get_or_resolve_stream_url(entry: dict) -> str:
-    if entry.get("stream_url"):
-        return entry["stream_url"]
+async def get_or_resolve_stream_url(entry: dict, force_refresh: bool = False) -> str:
+    now = time.time()
+    cached_url = entry.get("stream_url")
+    cached_at = entry.get("resolved_at", 0)
 
-    search_query = entry.get("query") or entry.get("title")
+    # Re-extract if stream_url is missing or older than 5 minutes (300s) to avoid 403 stream expiry
+    if not force_refresh and cached_url and (now - cached_at < 300):
+        return cached_url
+
+    search_query = entry.get("query") or entry.get("webpage_url") or entry.get("title")
     if not search_query:
+        if cached_url:
+            return cached_url
         raise ValueError("No search query available for track.")
 
     if not search_query.startswith("http://") and not search_query.startswith("https://") and not search_query.startswith("ytsearch1:"):
@@ -11875,6 +11893,8 @@ async def get_or_resolve_stream_url(entry: dict) -> str:
     ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
     info = await asyncio.to_thread(ytdl.extract_info, search_query, download=False)
     if not info:
+        if cached_url:
+            return cached_url
         raise RuntimeError(f"Could not extract info for query: {search_query}")
 
     if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
@@ -11886,9 +11906,12 @@ async def get_or_resolve_stream_url(entry: dict) -> str:
         stream_url = formats[-1].get("url") if formats else None
 
     if not stream_url:
+        if cached_url:
+            return cached_url
         raise RuntimeError(f"No valid audio stream URL found for {search_query}")
 
     entry["stream_url"] = stream_url
+    entry["resolved_at"] = now
     if info.get("title"):
         entry["title"] = info["title"]
     if info.get("uploader"):
@@ -12041,7 +12064,8 @@ async def play_next_track(guild_id: str):
         return
 
     try:
-        stream_url = await get_or_resolve_stream_url(next_entry)
+        # Force refresh stream URL right before playing so YouTube token/URL is never expired
+        stream_url = await get_or_resolve_stream_url(next_entry, force_refresh=True)
     except Exception as err:
         print(f"Error resolving stream for {next_entry.get('title')}: {err}")
         return await play_next_track(guild_id)
@@ -12050,24 +12074,38 @@ async def play_next_track(guild_id: str):
         return await play_next_track(guild_id)
 
     try:
-        def create_audio_player():
-            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-            vol = state.get("volume", 0.5)
-            if vol != 1.0:
-                return discord.PCMVolumeTransformer(source, volume=vol)
-            return source
+        vol = state.get("volume", 0.5)
+        player = None
 
-        player = await asyncio.to_thread(create_audio_player)
+        # Try high-performance FFmpegOpusAudio first if volume is 1.0 (avoids CPU re-encoding overhead across multiple servers)
+        if vol == 1.0:
+            try:
+                player = await discord.FFmpegOpusAudio.from_probe(
+                    stream_url,
+                    before_options=FFMPEG_OPTIONS["before_options"],
+                    options=FFMPEG_OPTIONS["options"]
+                )
+            except Exception as probe_err:
+                print(f"FFmpegOpusAudio probe fallback: {probe_err}")
+
+        if player is None:
+            def create_pcm_player():
+                source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+                if vol != 1.0:
+                    return discord.PCMVolumeTransformer(source, volume=vol)
+                return source
+
+            player = await asyncio.to_thread(create_pcm_player)
 
         def after_play(error):
             if error:
-                print(f"Music playback error: {error}")
-            bot.loop.create_task(play_next_track(str(guild_id)))
+                print(f"Music playback error on guild {guild_id}: {error}")
+            bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(play_next_track(str(guild_id))))
 
         voice.play(player, after=after_play)
     except Exception as exc:
         print(f"Failed to play audio stream on guild {guild_id}: {exc}")
-        bot.loop.create_task(play_next_track(str(guild_id)))
+        bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(play_next_track(str(guild_id))))
 
     title = next_entry.get("title")
     duration = next_entry.get("duration", 0)
