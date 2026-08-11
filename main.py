@@ -14,6 +14,7 @@ def keep_alive(): return "UwU Bot is alive & running!", 200
 # ==============================================
 import discord
 from discord.ext import commands, tasks
+import requests
 import random, json, time, os, asyncio, socket, uuid, re, traceback, hashlib
 import aiohttp
 from html import unescape
@@ -22373,3 +22374,83 @@ def start_keep_alive():
 if __name__ == "__main__":
     start_keep_alive()
     run_bot()
+# ----------------------------------------------------
+# UNIVERSAL INSTAGRAM INTEGRATION (PASTED AT BOTTOM)
+# ----------------------------------------------------
+import requests as __req
+import discord as __ds
+
+# ⚠️ PUT YOUR PERSONAL API TOKEN FROM APIFY HERE
+__APIFY_TOKEN = "apify_api_i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN"
+
+@bot.event
+async def on_message(message):
+    # Ignore messages sent by bots
+    if message.author.bot:
+        return
+
+    # Look for the exact custom prefix trigger
+    if message.content.lower().startswith("uwu ig"):
+        # Strip out "uwu ig", commas, and spaces to isolate the username
+        raw_input = message.content[6:].strip()
+        clean_username = raw_input.replace(",", "").strip().lower()
+
+        if not clean_username:
+            await message.channel.send("❌ Please provide a valid Instagram username!")
+            return
+
+        await message.channel.send(f"🔍 Fetching Instagram details for `@{clean_username}`...")
+
+        url = f"https://apify.com{__APIFY_TOKEN}"
+        payload = {"usernames": [clean_username]}
+
+        try:
+            # 35-second timeout handles proxy rotation delays safely
+            response = __req.post(url, json=payload, timeout=35)
+
+            if response.status_code in:
+                data = response.json()
+
+                if data and len(data) > 0:
+                    profile = data[0]
+
+                    if profile.get("error") or not profile.get("id"):
+                        await message.channel.send("❌ Profile not found, private, or could not be crawled.")
+                        return
+
+                    # Build a clean Discord embed layout
+                    embed = __ds.Embed(
+                        title=f"Instagram: {profile.get('fullName', clean_username)}",
+                        url=f"https://instagram.com{clean_username}",
+                        description=profile.get("biography", "No bio provided."),
+                        color=0xE1306C
+                    )
+
+                    if profile.get("profilePicUrl"):
+                        embed.set_thumbnail(url=profile.get("profilePicUrl"))
+
+                    f_count = profile.get('followersCount', 0)
+                    g_count = profile.get('followsCount', 0)
+                    p_count = profile.get('postsCount', 0)
+
+                    embed.add_field(name="👥 Followers", value=f"{f_count:,}", inline=True)
+                    embed.add_field(name="🔄 Following", value=f"{g_count:,}", inline=True)
+                    embed.add_field(name="📸 Posts", value=f"{p_count:,}", inline=True)
+
+                    verified = "Yes ✅" if profile.get("isVerified") else "No ❌"
+                    embed.set_footer(text=f"Verified Account: {verified} | Powered by Apify")
+
+                    await message.channel.send(embed=embed)
+                    return
+                else:
+                    await message.channel.send("❌ Profile data structure returned blank.")
+            else:
+                await message.channel.send(f"⚠️ Apify Server error (Code: {response.status_code}).")
+
+        except Exception as e:
+            print(f"Scraper error: {str(e)}")
+            await message.channel.send("⚠️ Failed to parse data from the scraping node.")
+            return
+
+    # IMPORTANT: This line ensures your other 20,000 lines of commands still run perfectly!
+    await bot.process_commands(message)
