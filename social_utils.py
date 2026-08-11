@@ -11,6 +11,8 @@ import urllib.error
 # Simple in-memory cache to avoid repeated fetches
 _SIMPLE_CACHE = {}
 _CACHE_TTL = 300  # seconds
+_IG_PROFILE_CACHE = {}
+_IG_CACHE_TTL = 3600  # 1 hour cache for IG profiles
 _DISK_CACHE_FILE = "social_cache.json"
 _DISK_CACHE = {}
 
@@ -26,12 +28,16 @@ def _load_disk_cache():
         with open(_DISK_CACHE_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
             _DISK_CACHE.update(raw)
+            # Restore IG profile cache if present
+            if "_ig_profiles" in raw and isinstance(raw["_ig_profiles"], dict):
+                _IG_PROFILE_CACHE.update(raw["_ig_profiles"])
     except Exception:
         return
 
 
 def _save_disk_cache():
     try:
+        _DISK_CACHE["_ig_profiles"] = _IG_PROFILE_CACHE
         with open(_DISK_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(_DISK_CACHE, f)
     except Exception:
@@ -330,6 +336,21 @@ def _sync_post_json(url, payload, timeout=45):
 
 async def try_instagram_api(username):
     """Attempt to use Apify API (APIFY_API_TOKEN / APIFY_TOKEN) or IG_API_TOKEN if credentials are available."""
+    clean_user = username.strip().lstrip("@")
+    if not clean_user:
+        return None
+
+    # Check cache first for instant response
+    _load_disk_cache()
+    now = time.time()
+    cache_key = clean_user.lower()
+    if cache_key in _IG_PROFILE_CACHE:
+        entry = _IG_PROFILE_CACHE[cache_key]
+        if isinstance(entry, dict) and (now - entry.get("_ts", 0)) < _IG_CACHE_TTL:
+            cached_data = dict(entry)
+            cached_data.pop("_ts", None)
+            return cached_data
+
     token = (
         os.getenv("APIFY_API_TOKEN") or
         os.getenv("APIFY_TOKEN") or
@@ -340,21 +361,17 @@ async def try_instagram_api(username):
     if not token:
         return None
 
-    clean_user = username.strip().lstrip("@")
-    if not clean_user:
-        return None
-
     loop = asyncio.get_running_loop()
 
-    # Try actor 1: apify~instagram-profile-scraper
-    url1 = f"https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token={token}"
+    # Try actor 1: apify~instagram-profile-scraper (with 20s timeout on Apify side)
+    url1 = f"https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token={token}&timeout=20"
     payload1 = {"usernames": [clean_user], "resultsLimit": 1}
     try:
-        items = await loop.run_in_executor(None, _sync_post_json, url1, payload1, 30)
+        items = await loop.run_in_executor(None, _sync_post_json, url1, payload1, 25)
         if isinstance(items, list) and len(items) > 0:
             data = items[0]
             if isinstance(data, dict) and (data.get("username") or data.get("followersCount") is not None or data.get("fullName")):
-                return {
+                res = {
                     "username": data.get("username") or clean_user,
                     "name": data.get("fullName") or data.get("name"),
                     "biography": data.get("biography") or data.get("bio"),
@@ -366,18 +383,23 @@ async def try_instagram_api(username):
                     "is_private": bool(data.get("isPrivate")),
                     "external_url": data.get("externalUrl") or data.get("website"),
                 }
+                cache_entry = dict(res)
+                cache_entry["_ts"] = now
+                _IG_PROFILE_CACHE[cache_key] = cache_entry
+                _save_disk_cache()
+                return res
     except Exception as exc:
         print(f"Apify actor 1 failed: {exc}")
 
-    # Fallback to actor 2: apify~instagram-scraper
-    url2 = f"https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items?token={token}"
+    # Fallback to actor 2: apify~instagram-scraper (with 15s timeout on Apify side)
+    url2 = f"https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items?token={token}&timeout=15"
     payload2 = {"directUrls": [f"https://www.instagram.com/{clean_user}/"], "resultsType": "details", "resultsLimit": 1}
     try:
-        items2 = await loop.run_in_executor(None, _sync_post_json, url2, payload2, 30)
+        items2 = await loop.run_in_executor(None, _sync_post_json, url2, payload2, 15)
         if isinstance(items2, list) and len(items2) > 0:
             data = items2[0]
             if isinstance(data, dict) and (data.get("username") or data.get("followersCount") is not None or data.get("fullName")):
-                return {
+                res = {
                     "username": data.get("username") or clean_user,
                     "name": data.get("fullName") or data.get("name"),
                     "biography": data.get("biography") or data.get("bio"),
@@ -389,6 +411,11 @@ async def try_instagram_api(username):
                     "is_private": bool(data.get("isPrivate")),
                     "external_url": data.get("externalUrl") or data.get("website"),
                 }
+                cache_entry = dict(res)
+                cache_entry["_ts"] = now
+                _IG_PROFILE_CACHE[cache_key] = cache_entry
+                _save_disk_cache()
+                return res
     except Exception as exc:
         print(f"Apify actor 2 failed: {exc}")
 
