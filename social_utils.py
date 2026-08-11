@@ -307,7 +307,7 @@ def get_tiktok_counts_from_sig_state(html):
 _dummy = get_instagram_counts_from_shared_data  # keep linter quiet
 
 
-def _sync_post_json(url, payload, timeout=30):
+def _sync_post_json(url, payload, timeout=45):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(
         url,
@@ -320,7 +320,7 @@ def _sync_post_json(url, payload, timeout=30):
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status == 200:
+            if 200 <= resp.status < 300:
                 body = resp.read().decode('utf-8', errors='ignore')
                 return json.loads(body)
     except Exception as exc:
