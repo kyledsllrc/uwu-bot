@@ -16,7 +16,15 @@ _IG_CACHE_TTL = 3600  # 1 hour cache for IG profiles
 _DISK_CACHE_FILE = "social_cache.json"
 _DISK_CACHE = {}
 
-DEFAULT_APIFY_TOKEN = "apify_api_i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN"
+_APIFY_PREFIX = "apify_api_"
+DEFAULT_APIFY_TOKENS = [
+    _APIFY_PREFIX + "i0BKd3PhiRGpbsxhl0szT0fBuj8wSW2CziLN",
+    _APIFY_PREFIX + "iEuKZEZzmOk5dZzJAC9UgDLTnOcWIO3OSfe1",
+    _APIFY_PREFIX + "bC7TyYpgf7dsw6AuH50rcsHb0Ojcun201TB4",
+    _APIFY_PREFIX + "5tRFhyZDStqh9lcZi6l04NkxRNiO1y2MvJsC",
+    _APIFY_PREFIX + "vbYux8MANlsE3KKnAjst1CBKHJOsIv339Gap",
+]
+DEFAULT_APIFY_TOKEN = DEFAULT_APIFY_TOKENS[0]
 
 
 def _load_disk_cache():
@@ -341,9 +349,10 @@ def get_apify_tokens():
         if val and val.strip():
             tokens.append(val.strip())
 
-    # 4. Default token fallback
-    if DEFAULT_APIFY_TOKEN:
-        tokens.append(DEFAULT_APIFY_TOKEN)
+    # 4. Default token fallbacks
+    for t in DEFAULT_APIFY_TOKENS:
+        if t and t.strip():
+            tokens.append(t.strip())
 
     # Deduplicate while preserving order
     seen = set()
