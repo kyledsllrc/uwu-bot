@@ -156,35 +156,60 @@ BOOSTER_SHOP_ITEMS = {
 }
 
 
-def is_server_booster(member, user=None):
+def is_server_booster(member, user=None, guild=None):
     """Check if member is a Server Booster or has Permanent Shop Access."""
     if user is not None:
+        if user.get("is_booster") or user.get("booster"):
+            return True
         inventory = user.get("inventory", [])
         if "permanent_shop_access" in inventory:
             return True
 
-    if not isinstance(member, discord.Member):
+    if member is None:
         return False
 
+    member_id = getattr(member, "id", None)
+    target_guild = guild or getattr(member, "guild", None)
+
+    # If member is a User object or cached separately, fetch guild member object if available
+    guild_member = member
+    if target_guild is not None and member_id is not None:
+        found_member = target_guild.get_member(member_id)
+        if found_member is not None:
+            guild_member = found_member
+
     # 1. Check premium_since timestamp set by Discord
-    if getattr(member, "premium_since", None) is not None:
+    if getattr(guild_member, "premium_since", None) is not None or getattr(member, "premium_since", None) is not None:
         return True
 
-    # 2. Check guild premium subscribers list if member has guild
-    if hasattr(member, "guild") and member.guild is not None:
+    # 2. Check guild premium subscribers list by ID matching
+    if target_guild is not None and member_id is not None:
         try:
-            if member in getattr(member.guild, "premium_subscribers", []):
+            premium_subs = getattr(target_guild, "premium_subscribers", []) or []
+            if any(getattr(sub, "id", None) == member_id for sub in premium_subs):
                 return True
         except Exception:
             pass
 
-    # 3. Check roles for nitro booster / premium subscriber flags and role names
-    for role in getattr(member, "roles", []):
-        if getattr(role, "is_premium_subscriber", lambda: False)():
-            return True
-        r_name = role.name.lower()
-        if any(kw in r_name for kw in ("booster", "server booster", "nitro booster", "boost")):
-            return True
+        # 3. Check official guild.premium_subscriber_role
+        try:
+            booster_role = getattr(target_guild, "premium_subscriber_role", None)
+            if booster_role and hasattr(guild_member, "roles") and booster_role in guild_member.roles:
+                return True
+        except Exception:
+            pass
+
+    # 4. Check roles on guild_member or member for nitro booster flags and role names
+    roles_to_check = getattr(guild_member, "roles", []) or getattr(member, "roles", []) or []
+    for role in roles_to_check:
+        try:
+            if getattr(role, "is_premium_subscriber", lambda: False)():
+                return True
+            r_name = getattr(role, "name", "").lower()
+            if any(kw in r_name for kw in ("booster", "server booster", "nitro booster", "boost")):
+                return True
+        except Exception:
+            pass
 
     return False
 

@@ -1545,7 +1545,7 @@ def is_recent_spam_message(message, now):
 async def handle_antispam_message(message):
     if message.guild is None or message.author.bot:
         return False
-    if booster_utils.is_server_booster(message.author, get_user(message.author.id)):
+    if booster_utils.is_server_booster(message.author, get_user(message.author.id), guild=message.guild):
         return False
     settings = get_guild_moderation_settings(message.guild)
     if not settings.get("antispam", False):
@@ -3343,6 +3343,25 @@ async def boosters_cmd(ctx):
     return await ctx.send(embed=embed)
 
 
+@bot.command(name="setbooster", aliases=[",setbooster", "boosteradd", "boosterremove"])
+async def setbooster_cmd(ctx, target: discord.Member = None, status: str = "on"):
+    """Admin command to grant or revoke server booster status manually."""
+    if not is_owner(ctx) and not (ctx.guild and ctx.author.guild_permissions.administrator):
+        return await ctx.send("❌ Only Administrators or Bot Owners can use this command!")
+    if target is None:
+        target = ctx.author
+
+    u_data = get_user(target.id)
+    state = status.lower() in ("on", "true", "enable", "add", "yes", "1")
+    u_data["is_booster"] = state
+    save_data(DATA)
+
+    if state:
+        await ctx.send(f"⚡ Granted **Server Booster** status & VIP perks to {target.mention}! They can now use `{get_prefix()}help` for the VIP Booster Menu!")
+    else:
+        await ctx.send(f"🚫 Revoked **Server Booster** status from {target.mention}.")
+
+
 @bot.command(name="booster", aliases=[",booster", "boosterclaim", ",boosterclaim", "boostershop", ",boostershop", "uwubooster"])
 async def booster_cmd(ctx, action: str = None, *, item_arg: str = None):
     """Server Booster daily rewards, benefits, and Booster Shop."""
@@ -3352,7 +3371,10 @@ async def booster_cmd(ctx, action: str = None, *, item_arg: str = None):
     if invoked_alias in ("boostershop", ",boostershop") and not action:
         action = "shop"
 
-    is_booster = booster_utils.is_server_booster(ctx.author, user)
+    is_booster = booster_utils.is_server_booster(ctx.author, user, guild=ctx.guild)
+    if is_booster and not user.get("is_booster"):
+        user["is_booster"] = True
+        save_data(DATA)
 
     # Default action: claim or show status
     if not action or action.lower() in ("claim", "daily", "get", "reward"):
@@ -17297,7 +17319,7 @@ async def on_message(message):
         return
     if message.guild is not None:
         u_data = get_user(message.author.id)
-        if booster_utils.is_server_booster(message.author, u_data):
+        if booster_utils.is_server_booster(message.author, u_data, guild=message.guild):
             now_ts = time.time()
             last_c = u_data.get("last_booster_claim", 0)
             if now_ts - last_c >= 86400:
@@ -17407,7 +17429,7 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.CommandOnCooldown):
-        if ctx.command and ctx.command.name.lower() != "booster" and booster_utils.is_server_booster(ctx.author, get_user(ctx.author.id)):
+        if ctx.command and ctx.command.name.lower() != "booster" and booster_utils.is_server_booster(ctx.author, get_user(ctx.author.id), guild=ctx.guild):
             ctx.command.reset_cooldown(ctx)
             await ctx.reinvoke()
             return
@@ -22021,7 +22043,10 @@ async def enable_category_cmd(ctx, category: str):
 async def help_cmd(ctx, category: str = None):
     p = get_prefix()
     user_data = get_user(ctx.author.id)
-    is_booster = booster_utils.is_server_booster(ctx.author, user_data)
+    is_booster = booster_utils.is_server_booster(ctx.author, user_data, guild=ctx.guild)
+    if is_booster and not user_data.get("is_booster"):
+        user_data["is_booster"] = True
+        save_data(DATA)
     guild_name = ctx.guild.name if ctx.guild else "our server"
 
     HELP_CATEGORIES = {
