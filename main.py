@@ -17645,8 +17645,8 @@ async def money(ctx):
         except Exception:
             partner_name = f"Partner ({partner_id})"
         marriage_line = (
-            f"\n💍 **Married to {partner_name}** | Partner Wallet: `{format_coins(partner_wallet)}` | "
-            f"**Shared Household Total:** `{format_coins(shared_total)} uwuncy`"
+            f"\n💍 **Married to {partner_name}** • Partner: `{format_coins(partner_wallet)}` • "
+            f"Joint: `{format_coins(shared_total)} uwuncy`"
         )
 
     await ctx.send(
@@ -22243,11 +22243,16 @@ async def help_cmd(ctx, category: str = None):
             if key == "admin":
                 if is_owner(ctx):
                     available_categories.append(key)
+            elif key == "booster":
+                if is_booster:
+                    available_categories.append(key)
             else:
                 available_categories.append(key)
 
     if not requested:
         if is_booster:
+            srv_boosts = getattr(ctx.guild, "premium_subscription_count", 0) if ctx.guild else 0
+            usr_boosts = booster_utils.get_user_boost_count(ctx.author)
             lines = [
                 f"💎 ════════════════════════════════════════ 💎",
                 f"⚡ **VIP SERVER BOOSTER HELP MENU** ⚡",
@@ -22259,7 +22264,8 @@ async def help_cmd(ctx, category: str = None):
                 f"• ⚡ **Command Cooldowns:** `BYPASSED (0s cooldowns on all commands)`",
                 f"• 🖼️ **Links & Media:** `BYPASSED` in restricted channels",
                 f"• 🛒 **Booster Shop Catalog:** `UNLOCKED` (`{p}booster shop`)",
-                f"• 💎 **Server Boost Count:** `{booster_utils.get_user_boost_count(ctx.author)} Boost(s)`",
+                f"• 💎 **Server Total Boosts:** `{srv_boosts} Boost(s)`",
+                f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)`",
                 f"",
                 f"Use `{p}help <category>` to view a specific section.",
                 f""
@@ -22296,6 +22302,13 @@ async def help_cmd(ctx, category: str = None):
         if requested == key or requested in cat_obj["aliases"]:
             matched_key = key
             break
+
+    if matched_key == "booster" and not is_booster:
+        return await ctx.send(
+            f"💎 **Server Booster Exclusive Category**\n"
+            f"The booster commands category is reserved exclusively for Server Boosters of **{guild_name}**!\n"
+            f"Boost this server to unlock **5T daily uwuncy**, **0s command cooldowns**, and exclusive booster shop commands!"
+        )
 
     if matched_key is None or matched_key not in available_categories:
         valid = ", ".join(HELP_CATEGORIES[key]["title"] for key in available_categories)

@@ -159,8 +159,6 @@ BOOSTER_SHOP_ITEMS = {
 def is_server_booster(member, user=None, guild=None):
     """Check if member is a Server Booster or has Permanent Shop Access."""
     if user is not None:
-        if user.get("is_booster") or user.get("booster"):
-            return True
         inventory = user.get("inventory", [])
         if "permanent_shop_access" in inventory:
             return True
