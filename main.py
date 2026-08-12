@@ -18,6 +18,7 @@ import random, json, time, os, asyncio, socket, uuid, re, traceback, hashlib
 import aiohttp
 from html import unescape
 import social_utils
+import booster_utils
 from typing import Union
 from datetime import datetime, timezone, timedelta
 from threading import Lock
@@ -1544,6 +1545,8 @@ def is_recent_spam_message(message, now):
 async def handle_antispam_message(message):
     if message.guild is None or message.author.bot:
         return False
+    if booster_utils.is_server_booster(message.author, get_user(message.author.id)):
+        return False
     settings = get_guild_moderation_settings(message.guild)
     if not settings.get("antispam", False):
         return False
@@ -1947,11 +1950,50 @@ async def on_guild_role_update(before: discord.Role, after: discord.Role):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Detect when roles were added to a member that grant dangerous permissions."""
+    """Detect server boost events and role permission escalation (antinuke)."""
+    # 1. Real-time Server Boost Event Detection
+    was_boosting = getattr(before, "premium_since", None) is not None or any(getattr(r, "is_premium_subscriber", lambda: False)() for r in getattr(before, "roles", []))
+    is_boosting = getattr(after, "premium_since", None) is not None or any(getattr(r, "is_premium_subscriber", lambda: False)() for r in getattr(after, "roles", []))
+
+    if not was_boosting and is_boosting:
+        # Member just boosted the server!
+        user_data = get_user(after.id)
+        user_data["wallet"] = user_data.get("wallet", 0) + 5_000_000_000_000
+        save_data(DATA)
+
+        # Broadcast congratulatory embed in system channel or first available text channel
+        guild = after.guild
+        channel = guild.system_channel
+        if channel is None or not channel.permissions_for(guild.me).send_messages:
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    channel = ch
+                    break
+
+        if channel:
+            embed = discord.Embed(
+                title="⚡ NEW SERVER BOOST DETECTED!",
+                description=f"🎉 **Thank you {after.mention} for boosting {guild.name}!**\n\n"
+                            f"✨ You have automatically received a **+5,000,000,000,000 (5T) uwuncy** boost bonus!\n\n"
+                            f"⚡ **Unlocked Booster Perks:**\n"
+                            f"• `5T` Daily rewards (`uwu booster`)\n"
+                            f"• **0 Cooldowns** on standard commands\n"
+                            f"• **Link/Image permissions** in restricted channels\n"
+                            f"• Exclusive access to `uwu booster shop`!",
+                color=discord.Color.purple()
+            )
+            embed.set_thumbnail(url=str(after.display_avatar.url))
+            embed.set_footer(text="Thank you for supporting our server!")
+            try:
+                await channel.send(embed=embed)
+            except Exception:
+                pass
+
     if before.roles == after.roles:
         return
     guild = after.guild
     settings = get_guild_moderation_settings(guild)
+
     if not settings.get("antinuke"):
         return
     added_roles = [r for r in after.roles if r not in before.roles]
@@ -3248,6 +3290,230 @@ async def apify_cmd(ctx):
         print(f"Error in apify_cmd: {exc}")
         await ctx.send(f"An error occurred while fetching Apify balances: `{exc}`")
 
+
+
+
+
+@bot.command(name="boosters", aliases=[",boosters", "boosterlist", ",boosterlist", "booststatus", ",booststatus", "boosterslist"])
+async def boosters_cmd(ctx):
+    """View all active Server Boosters in this server, current boost tier, and booster status."""
+    guild = ctx.guild
+    if guild is None:
+        return await ctx.send("❌ This command can only be used inside a Discord server!")
+
+    boosters = booster_utils.get_guild_boosters(guild)
+    boost_count = getattr(guild, "premium_subscription_count", len(boosters))
+    tier = getattr(guild, "premium_tier", 0)
+
+    tier_reqs = {0: "2 boosts for Level 1", 1: "7 boosts for Level 2", 2: "14 boosts for Level 3", 3: "MAX LEVEL REACHED! 🎉"}
+    next_goal = tier_reqs.get(tier, "MAX LEVEL")
+
+    embed = discord.Embed(
+        title=f"⚡ {guild.name} — Server Boosters & Status",
+        description=f"**Server Boost Level:** Tier {tier} ({boost_count} total boosts)\n"
+                    f"**Next Goal:** {next_goal}\n"
+                    f"**Active Boosters Count:** `{len(boosters)}`",
+        color=discord.Color.purple()
+    )
+
+    if boosters:
+        lines = []
+        for idx, member in enumerate(boosters, 1):
+            boost_since = getattr(member, "premium_since", None)
+            since_str = f"since <t:{int(boost_since.timestamp())}:R>" if boost_since else "Active Booster"
+            count = booster_utils.get_user_boost_count(member)
+            lines.append(f"`{idx}.` {member.mention} ({member.display_name}) — **{count} Boost{'s' if count > 1 else ''}** ({since_str})")
+
+        embed.add_field(
+            name="💎 Active Server Boosters",
+            value="\n".join(lines[:20]),
+            inline=False
+        )
+        if len(lines) > 20:
+            embed.set_footer(text=f"And {len(lines) - 20} more boosters! Thank you everyone for supporting {guild.name}!")
+        else:
+            embed.set_footer(text="Boost this server to unlock 5T daily uwuncy, 0 cooldowns, and Booster Shop!")
+    else:
+        embed.add_field(
+            name="💎 Active Server Boosters",
+            value="No active boosters detected yet on this server!\nBe the first to boost by using Discord's Server Boost button to claim **5T daily uwuncy** and exclusive perks!",
+            inline=False
+        )
+
+    return await ctx.send(embed=embed)
+
+
+@bot.command(name="booster", aliases=[",booster", "boosterclaim", ",boosterclaim", "boostershop", ",boostershop", "uwubooster"])
+async def booster_cmd(ctx, action: str = None, *, item_arg: str = None):
+    """Server Booster daily rewards, benefits, and Booster Shop."""
+    user = get_user(ctx.author.id)
+    invoked_alias = ctx.invoked_with.lower() if ctx.invoked_with else ""
+
+    if invoked_alias in ("boostershop", ",boostershop") and not action:
+        action = "shop"
+
+    is_booster = booster_utils.is_server_booster(ctx.author, user)
+
+    # Default action: claim or show status
+    if not action or action.lower() in ("claim", "daily", "get", "reward"):
+        if not is_booster:
+            embed = discord.Embed(
+                title="💎 Server Booster Perks & Exclusive Rewards",
+                description="This command is exclusively reserved for **Server Boosters**! Boost this server to unlock incredible perks:",
+                color=discord.Color.purple()
+            )
+            embed.add_field(
+                name="⚡ Server Booster Benefits",
+                value="• 💰 **5,000,000,000,000 (5T) Base Daily Reward**\n• 📈 **Stacking Multipliers** (2 Boosts = 2×, 3 Boosts = 3×)\n• ⚡ **No Cooldowns** on normal commands!\n• 🖼️ **Link & Image Permission** in restricted channels!\n• 📅 **Auto-Claim Pass** eligibility\n• 🛍️ **Access to Exclusive Booster Shop**",
+                inline=False
+            )
+            embed.add_field(
+                name="🛍️ Booster Shop Preview",
+                value="Type `uwu booster shop` to view all exclusive booster shop items!",
+                inline=False
+            )
+            embed.set_footer(text="Boost our server today to start claiming 5T daily uwuncy!")
+            return await ctx.send(embed=embed)
+
+        # Check 24h cooldown
+        now = time.time()
+        last_claim = user.get("last_booster_claim", 0)
+        cooldown_time = 86400  # 24 hours strictly
+
+        if now - last_claim < cooldown_time:
+            rem_sec = int(cooldown_time - (now - last_claim))
+            hours = rem_sec // 3600
+            mins = (rem_sec % 3600) // 60
+            embed = discord.Embed(
+                title="⏳ Daily Booster Reward on Cooldown",
+                description=f"You have already claimed your daily booster reward!\n\n⏰ Please wait **{hours}h {mins}m** before claiming again.\n💡 *Hint: You can buy a `Cooldown Skip` in `uwu booster shop` to claim again immediately!*",
+                color=discord.Color.gold()
+            )
+            return await ctx.send(embed=embed)
+
+        # Calculate reward
+        boost_count = booster_utils.get_user_boost_count(ctx.author, user)
+        total_reward, breakdown = booster_utils.calculate_booster_daily_reward(user, boost_count)
+
+        user["wallet"] = user.get("wallet", 0) + total_reward
+        user["last_booster_claim"] = now
+        save_data(DATA)
+
+        embed = discord.Embed(
+            title="⚡ Server Booster Daily Reward Claimed!",
+            description=f"Thank you for boosting **{ctx.guild.name if ctx.guild else 'our server'}**! Here is your daily reward:",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="💵 Base Reward", value="`5,000,000,000,000 uwuncy (5T)`", inline=True)
+        embed.add_field(name="📈 Boost Stack", value=f"`{breakdown['count_mult']}×` ({boost_count} Boost{'s' if boost_count > 1 else ''})", inline=True)
+        if breakdown['perm_mult'] > 1.0:
+            embed.add_field(name="💎 Perm Bonus", value=f"`{breakdown['perm_mult']}×`", inline=True)
+        if breakdown['pass_mult'] > 1.0:
+            embed.add_field(name="📈 Pass Multiplier", value=f"`{breakdown['pass_mult']}×`", inline=True)
+
+        embed.add_field(
+            name="🎁 Total Earned",
+            value=f"**+{booster_utils.format_trillion(total_reward)} uwuncy**",
+            inline=False
+        )
+        embed.add_field(
+            name="💳 New Wallet Balance",
+            value=f"**{booster_utils.format_trillion(user['wallet'])} uwuncy**",
+            inline=False
+        )
+        embed.set_footer(text="Cooldown: Strictly 24 hours per user. Thank you for supporting the server!")
+        return await ctx.send(embed=embed)
+
+    elif action.lower() in ("shop", "store", "catalog", "items"):
+        if not is_booster:
+            return await ctx.send("❌ The Booster Shop is exclusively for **Server Boosters**! Boost the server or buy Permanent Shop Access to unlock.")
+
+        embed = discord.Embed(
+            title="🛍️ Exclusive Server Booster Shop",
+            description="All items are exclusively purchasable by **Server Boosters**!\nUse `uwu booster buy <item_id>` to purchase.",
+            color=discord.Color.purple()
+        )
+
+        # Group by category
+        categories = {}
+        for item_id, item in booster_utils.BOOSTER_SHOP_ITEMS.items():
+            cat = item["category"]
+            categories.setdefault(cat, []).append(item)
+
+        for cat, items in categories.items():
+            val_lines = []
+            for it in items:
+                price_fmt = booster_utils.format_trillion(it["price"])
+                val_lines.append(f"{it['icon']} **{it['name']}** (`{it['id']}`) — **{price_fmt}**\n*{it['desc']}*")
+            embed.add_field(name=f"━━ {cat} ━━", value="\n\n".join(val_lines), inline=False)
+
+        embed.set_footer(text=f"Your Balance: {booster_utils.format_trillion(user.get('wallet', 0))} uwuncy | Cooldown Skip = Instant claim!")
+        return await ctx.send(embed=embed)
+
+    elif action.lower() in ("buy", "purchase"):
+        if not is_booster:
+            return await ctx.send("❌ You must be a **Server Booster** to buy items from the Booster Shop!")
+
+        if not item_arg:
+            return await ctx.send("❌ Please specify an item ID to buy! Example: `uwu booster buy cooldown_skip` or `uwu booster buy 2x_earnings_pass` ")
+
+        item_id = item_arg.lower().strip()
+        if item_id not in booster_utils.BOOSTER_SHOP_ITEMS:
+            return await ctx.send("❌ Invalid item ID! Type `uwu booster shop` to see all valid item IDs.")
+
+        item = booster_utils.BOOSTER_SHOP_ITEMS[item_id]
+        price = item["price"]
+
+        if user.get("wallet", 0) < price:
+            return await ctx.send(f"❌ You need **{booster_utils.format_trillion(price)} uwuncy** to buy **{item['name']}**! You currently have {booster_utils.format_trillion(user.get('wallet', 0))}.")
+
+        # Deduct price
+        user["wallet"] -= price
+
+        # Apply purchase
+        if item_id == "cooldown_skip":
+            user["last_booster_claim"] = 0
+            msg = f"⏱️ **Cooldown Skipped!** Reset your daily booster cooldown. You can use `uwu booster` to claim your daily 5T+ reward again right now!"
+        elif item_id == "lump_sum_bonus":
+            now = time.time()
+            if now - user.get("last_lump_sum", 0) < 7 * 86400:
+                user["wallet"] += price
+                return await ctx.send("❌ You can only purchase the Lump Sum Bonus once every 7 days!")
+            user["wallet"] += 5_000_000_000_000
+            user["last_lump_sum"] = now
+            msg = f"💵 **Lump Sum Claimed!** Added **+5,000,000,000,000 (5T) uwuncy** directly to your wallet!"
+        elif item_id == "gift_token":
+            inv = user.setdefault("inventory", [])
+            inv.append("gift_token")
+            msg = f"🕹️ **Gift Token Acquired!** Added a Gift Token to your inventory."
+        elif "duration_days" in item:
+            passes = user.setdefault("booster_passes", {})
+            dur = item["duration_days"] * 86400
+            now = time.time()
+            cur = passes.get(item_id, 0)
+            passes[item_id] = max(now, cur) + dur
+            msg = f"🎉 **{item['icon']} {item['name']} Activated!** Valid for **{item['duration_days']} days**."
+        else:
+            inv = user.setdefault("inventory", [])
+            if item_id in inv and not item.get("stackable"):
+                user["wallet"] += price
+                return await ctx.send(f"❌ You already own the permanent item **{item['name']}**!")
+            inv.append(item_id)
+            msg = f"💎 **{item['icon']} {item['name']} Unlocked!** Permanent booster perk added to your account!"
+
+        save_data(DATA)
+
+        embed = discord.Embed(
+            title="🛍️ Booster Shop Purchase Successful!",
+            description=msg,
+            color=discord.Color.green()
+        )
+        embed.add_field(name="💰 Amount Spent", value=f"`{booster_utils.format_trillion(price)} uwuncy`", inline=True)
+        embed.add_field(name="💳 Remaining Wallet", value=f"`{booster_utils.format_trillion(user['wallet'])} uwuncy`", inline=True)
+        return await ctx.send(embed=embed)
+
+    else:
+        return await ctx.send("❌ Unknown booster subcommand! Available: `uwu booster`, `uwu booster shop`, `uwu booster buy <item_id>`")
 
 
 async def _music_play_next(ctx, guild_id: str):
@@ -11674,6 +11940,11 @@ def jackpot_payout(user, game, bet):
 def normalize_user(user):
     """Keep older Firebase accounts compatible with the current economy schema."""
     user.setdefault("wallet", 0)
+    user.setdefault("last_booster_claim", 0)
+    if not isinstance(user.get("booster_passes"), dict):
+        user["booster_passes"] = {}
+    user.setdefault("last_lump_sum", 0)
+    user.setdefault("birthday", "")
     user.setdefault("bank", 0)
     user.setdefault("last_daily", 0)
     user.setdefault("last_hunt", 0)
@@ -15179,7 +15450,6 @@ class UnoArenaGame:
             )
         embed.add_field(
             name="Your cards",
-            value="\n".join(uno_card_text(card) for card in hand) or "No cards — you win!",
             inline=False,
         )
         return embed
@@ -17025,6 +17295,23 @@ async def on_guild_role_delete(role):
 async def on_message(message):
     if message.author.bot:
         return
+    if message.guild is not None:
+        u_data = get_user(message.author.id)
+        if booster_utils.is_server_booster(message.author, u_data):
+            now_ts = time.time()
+            last_c = u_data.get("last_booster_claim", 0)
+            if now_ts - last_c >= 86400:
+                has_autoclaim = u_data.get("booster_passes", {}).get("auto_claim_pass", 0) > now_ts
+                if has_autoclaim:
+                    b_count = booster_utils.get_user_boost_count(message.author, u_data)
+                    tot_rew, _ = booster_utils.calculate_booster_daily_reward(u_data, b_count)
+                    u_data["wallet"] = u_data.get("wallet", 0) + tot_rew
+                    u_data["last_booster_claim"] = now_ts
+                    save_data(DATA)
+                    try:
+                        await message.channel.send(f"✨ **[Auto-Claim]** {message.author.mention}, your daily **+{booster_utils.format_trillion(tot_rew)} uwuncy** booster reward was automatically collected! ⚡")
+                    except Exception:
+                        pass
     if message.guild is not None and await handle_antispam_message(message):
         return
     if message.guild is not None and await handle_antibullying_message(message):
@@ -17119,6 +17406,12 @@ async def on_command_error(ctx, error):
     """Keep command mistakes readable without hiding real persistence failures."""
     if isinstance(error, commands.CommandNotFound):
         return
+    if isinstance(error, commands.CommandOnCooldown):
+        if ctx.command and ctx.command.name.lower() != "booster" and booster_utils.is_server_booster(ctx.author, get_user(ctx.author.id)):
+            ctx.command.reset_cooldown(ctx)
+            await ctx.reinvoke()
+            return
+        return await ctx.send(f"⏳ Cooldown! Try again in `{error.retry_after:.1f}s`.")
     if isinstance(error, commands.MissingRequiredArgument):
         return await ctx.send(
             f"❌ Missing `{error.param.name}`. Use `{get_prefix()}help` for command examples."
@@ -19822,7 +20115,6 @@ def sabong_fight_embed(match, headline, color=None):
     if match["log"]:
         embed.add_field(
             name="Play by play",
-            value="\n".join(match["log"][-4:]),
             inline=False,
         )
     return embed
@@ -21728,112 +22020,126 @@ async def enable_category_cmd(ctx, category: str):
 @bot.command(name="help")
 async def help_cmd(ctx, category: str = None):
     p = get_prefix()
+    user_data = get_user(ctx.author.id)
+    is_booster = booster_utils.is_server_booster(ctx.author, user_data)
+    guild_name = ctx.guild.name if ctx.guild else "our server"
 
     HELP_CATEGORIES = {
+        "booster": {
+            "title": "💎 Server Booster Exclusive Commands",
+            "aliases": ["boost", "boosters", "serverbooster", "boosterhelp"],
+            "items": [
+                ("booster", "claim daily 5T uwuncy reward & view booster multipliers"),
+                ("boosters", "view active server boosters & server boost tier level"),
+                ("booster shop", "browse exclusive booster items & passes catalog"),
+                ("booster buy <item_id>", "purchase booster items with uwuncy"),
+            ],
+            "desc": "Commands and daily benefits reserved exclusively for Server Boosters."
+        },
         "economy": {
-            "title": "Economy",
+            "title": "💰 Economy",
             "aliases": ["econ", "wallet", "bank"],
             "items": [
-                ("claim", ""),
-                ("daily", ""),
-                ("money", "bal / balance"),
-                ("info", "userinfo"),
-                ("deposit", "dep"),
-                ("withdraw", "with"),
-                ("give", "pay"),
-                ("history", "bets / recent"),
-                ("achievements", "ach / badges"),
-                ("quests", "quest / missions"),
-                ("jackpot", ""),
-                ("hunt", ""),
-                ("huntinfo", "huntlevel / huntstats"),
-                ("leaderboard", "lb / top"),
-                ("crypwuncy", "crypto / cryptos / market"),
-                ("invest", ""),
-                ("sell", "cashout / sellcrypto"),
-                ("investments", "portfolio / invested"),
-                ("shop", "store"),
-                ("buy", ""),
-                ("inventory", "inv"),
+                ("claim", "claim hourly uwuncy reward"),
+                ("daily", "claim daily uwuncy streak"),
+                ("money", "bal / balance — check wallet & bank"),
+                ("info", "userinfo — check user profile & stats"),
+                ("deposit", "dep <amount|all> — deposit into bank"),
+                ("withdraw", "with <amount|all> — withdraw from bank"),
+                ("give", "pay @user <amount> — transfer uwuncy"),
+                ("history", "bets / recent — transaction history"),
+                ("achievements", "ach / badges — view unlocked badges"),
+                ("quests", "quest / missions — daily & weekly quests"),
+                ("jackpot", "view server jackpot pool & entries"),
+                ("hunt", "hunt for wild animals & rewards"),
+                ("huntinfo", "huntlevel / huntstats — hunting level"),
+                ("leaderboard", "lb / top — view global rankings"),
+                ("crypwuncy", "crypto / market — live crypto prices"),
+                ("invest", "invest in crypto coins"),
+                ("sell", "cashout / sellcrypto — sell investments"),
+                ("investments", "portfolio / invested — view holdings"),
+                ("shop", "store — view global shop catalog"),
+                ("buy", "buy item from shop"),
+                ("inventory", "inv — view inventory items"),
             ],
         },
         "gambling": {
-            "title": "Gambling",
+            "title": "🎰 Gambling & Games",
             "aliases": ["games", "casino", "betting"],
             "items": [
-                ("cf", "coinflip"),
-                ("slot", "slots"),
-                ("bj", "blackjack"),
-                ("colorgame", "cg"),
-                ("mines", "m"),
-                ("dice", "roll"),
-                ("highlow", "hl"),
-                ("rr", "roulette"),
-                ("crash", "rocket"),
-                ("tower", "climb"),
-                ("wheel", "spin"),
-                ("ladder", "chain"),
-                ("scratch", "sc"),
-                ("sabong", "cockfight / tari"),
+                ("cf", "coinflip <amount> <heads|tails>"),
+                ("slot", "slots <amount>"),
+                ("bj", "blackjack <amount>"),
+                ("colorgame", "cg <amount> <red|blue|yellow|etc>"),
+                ("mines", "m <amount> [mines_count]"),
+                ("dice", "roll <amount> <over|under> <number>"),
+                ("highlow", "hl <amount>"),
+                ("rr", "roulette <amount> <red|black|number>"),
+                ("crash", "rocket <amount>"),
+                ("tower", "climb <amount>"),
+                ("wheel", "spin <amount>"),
+                ("ladder", "chain <amount>"),
+                ("scratch", "sc <amount>"),
+                ("sabong", "cockfight / tari <amount> <wala|meron>"),
             ],
         },
         "social": {
-            "title": "Social",
+            "title": "💬 Social & Marriage",
             "aliases": ["profile", "socials"],
             "items": [
-                ("profile", "[@user]"),
-                ("avatar", ", / av [@user]"),
-                ("banner", "[@user]"),
-                ("ig", ",ig"),
-                ("tt", ",tt"),
-                ("fb", ",fb"),
-                ("marry", "@user"),
-                ("divorce", ""),
-                ("ship", "@user @user"),
+                ("profile", "[@user] — view custom social profile"),
+                ("avatar", "av [@user] — view high-res avatar"),
+                ("banner", "[@user] — view server/user banner"),
+                ("ig", ",ig — view linked Instagram"),
+                ("tt", ",tt — view linked TikTok"),
+                ("fb", ",fb — view linked Facebook"),
+                ("marry", "@user — propose marriage to user"),
+                ("divorce", "end marriage status"),
+                ("ship", "@user @user — check love compatibility"),
             ],
         },
         "music": {
-            "title": "Music",
+            "title": "🎵 Music & Voice",
             "aliases": ["audio", "dj"],
             "items": [
-                ("!play", "<link|search>"),
-                ("pause", ""),
-                ("resume", ""),
-                ("skip", ""),
-                ("stop", ""),
-                ("volume", "[1-100]"),
-                ("lyrics", "[song name]"),
-                ("save", "[name]"),
+                ("!play", "<link|search> — play music in voice channel"),
+                ("pause", "pause playback"),
+                ("resume", "resume playback"),
+                ("skip", "skip current track"),
+                ("stop", "stop music & disconnect"),
+                ("volume", "[1-100] — set music volume"),
+                ("lyrics", "[song name] — search song lyrics"),
+                ("save", "[name] — save track to playlist"),
             ],
         },
         "moderation": {
-            "title": "Moderation",
+            "title": "🛡️ Moderation & Server Protection",
             "aliases": ["mod"],
             "items": [
-                ("kick", "@user [reason]"),
-                ("ban", "@user [reason]"),
-                ("unban", "<user_id_or_tag> [reason]"),
-                ("mute", "@user [duration] [reason]"),
-                ("unmute", "@user [reason]"),
-                ("purge", "<amount>"),
-                ("warn", "@user [reason]"),
-                ("clearwarns", "@user"),
-                ("nick", "@user [nickname]"),
-                ("setwelcome", "#channel / test / off"),
-                ("invites", "[@user | set #channel | sync]"),
-                ("antinuke", "on/off"),
-                ("antispam", "on/off"),
-                ("antiraid", "on/off"),
-                ("antibullying", "on/off"),
-                ("rollback", ""),
-                ("lock", ""),
-                ("unlock", ""),
-                ("modlog set", "clear"),
-                ("whitelist add", "remove"),
+                ("kick", "@user [reason] — kick member"),
+                ("ban", "@user [reason] — ban member"),
+                ("unban", "<user_id_or_tag> [reason] — unban member"),
+                ("mute", "@user [duration] [reason] — mute member"),
+                ("unmute", "@user [reason] — unmute member"),
+                ("purge", "<amount> — bulk delete messages"),
+                ("warn", "@user [reason] — warn member"),
+                ("clearwarns", "@user — clear warnings"),
+                ("nick", "@user [nickname] — change nickname"),
+                ("setwelcome", "#channel / test / off — welcome logs"),
+                ("invites", "[@user | set #channel | sync] — invite tracking"),
+                ("antinuke", "on/off — antinuke protection"),
+                ("antispam", "on/off — antispam filter"),
+                ("antiraid", "on/off — antiraid shield"),
+                ("antibullying", "on/off — antibullying filter"),
+                ("rollback", "restore recent server actions"),
+                ("lock", "lock channel"),
+                ("unlock", "unlock channel"),
+                ("modlog set", "clear — set mod logging channel"),
+                ("whitelist add", "remove — manage admin whitelist"),
             ],
         },
         "admin": {
-            "title": "Admin",
+            "title": "👑 Admin & Owner",
             "aliases": ["owner", "admin"],
             "items": [
                 ("setclaim", "claimamount / claiminfo"),
@@ -21851,6 +22157,7 @@ async def help_cmd(ctx, category: str = None):
                 ("resetuser", "wipeuser"),
                 ("resetstreak", ""),
                 ("resetuwuncy", "clearuwuncy / wipeuwuncy"),
+                ("apify", "apifybalance / apifystats"),
             ],
         },
     }
@@ -21860,9 +22167,9 @@ async def help_cmd(ctx, category: str = None):
             return f"- `{p}{name}` ({alias_text})"
         return f"- `{p}{name}`"
 
-    def format_category(name, category):
-        lines = [f"__{category['title']}__"]
-        lines.extend(format_command(cmd, alias) for cmd, alias in category['items'])
+    def format_category(name, category_dict):
+        lines = [f"__{category_dict['title']}__"]
+        lines.extend(format_command(cmd, alias) for cmd, alias in category_dict['items'])
         return lines
 
     def split_chunks(lines):
@@ -21880,26 +22187,64 @@ async def help_cmd(ctx, category: str = None):
 
     requested = category.strip().lower() if category else None
     available_categories = []
-    for key in HELP_CATEGORIES:
-        if key == "admin":
-            if is_owner(ctx):
+    
+    order = ["booster", "economy", "gambling", "social", "music", "moderation", "admin"]
+    for key in order:
+        if key in HELP_CATEGORIES:
+            if key == "admin":
+                if is_owner(ctx):
+                    available_categories.append(key)
+            else:
                 available_categories.append(key)
-        else:
-            available_categories.append(key)
 
     if not requested:
-        lines = [f"UwU Bot commands for {ctx.author.display_name}", f"Prefix: `{p}`", "", "Use `uwu help <category>` to view a section.", ""]
+        if is_booster:
+            lines = [
+                f"💎 ════════════════════════════════════════ 💎",
+                f"⚡ **VIP SERVER BOOSTER HELP MENU** ⚡",
+                f"Thank you {ctx.author.mention} for boosting **{guild_name}**!",
+                f"💎 ════════════════════════════════════════ 💎",
+                f"",
+                f"✨ **YOUR ACTIVE BOOSTER ADVANTAGES & PERKS:**",
+                f"• 🎁 **Daily Reward:** `+5,000,000,000,000 (5T) uwuncy` (`{p}booster`)",
+                f"• ⚡ **Command Cooldowns:** `BYPASSED (0s cooldowns on all commands)`",
+                f"• 🖼️ **Links & Media:** `BYPASSED` in restricted channels",
+                f"• 🛒 **Booster Shop Catalog:** `UNLOCKED` (`{p}booster shop`)",
+                f"• 💎 **Server Boost Count:** `{booster_utils.get_user_boost_count(ctx.author)} Boost(s)`",
+                f"",
+                f"Use `{p}help <category>` to view a specific section.",
+                f""
+            ]
+        else:
+            lines = [
+                f"🤖 **UwU Bot Help Menu** for {ctx.author.display_name}",
+                f"Prefix: `{p}`",
+                f"",
+                f"💎 **BOOST OUR SERVER FOR EXCLUSIVE PERKS!**",
+                f"Boost **{guild_name}** to unlock **5T daily uwuncy**, **0s command cooldowns**, and the **VIP Booster Help Menu**! (`{p}boosters` / `{p}booster`)",
+                f"",
+                f"Use `{p}help <category>` to view a specific section.",
+                f""
+            ]
+
         for key in available_categories:
-            category = HELP_CATEGORIES[key]
-            lines.extend(format_category(key, category))
-            lines.append("")
+            cat_obj = HELP_CATEGORIES[key]
+            if is_booster and key == "booster":
+                lines.append("⚡ **SERVER BOOSTER EXCLUSIVE COMMANDS**")
+                for cmd, alias in cat_obj['items']:
+                    lines.append(f"• `{p}{cmd}` — {alias}")
+                lines.append("")
+            else:
+                lines.extend(format_category(key, cat_obj))
+                lines.append("")
+
         for chunk in split_chunks(lines):
             await ctx.send(chunk)
         return
 
     matched_key = None
-    for key, category in HELP_CATEGORIES.items():
-        if requested == key or requested in category["aliases"]:
+    for key, cat_obj in HELP_CATEGORIES.items():
+        if requested == key or requested in cat_obj["aliases"]:
             matched_key = key
             break
 
@@ -21909,9 +22254,29 @@ async def help_cmd(ctx, category: str = None):
             f"Unknown help category `{category}`. Valid categories: {valid}."
         )
 
-    lines = [f"UwU help {matched_key}", ""]
-    category = HELP_CATEGORIES[matched_key]
-    lines.extend(format_category(matched_key, category))
+    cat_obj = HELP_CATEGORIES[matched_key]
+    if is_booster and matched_key == "booster":
+        lines = [
+            f"💎 **VIP SERVER BOOSTER COMMANDS & BENEFITS** 💎",
+            f"Special perks unlocked for boosting **{guild_name}**:",
+            f"",
+            f"• `{p}booster` (or `{p}booster claim`) — Claim your daily **5T uwuncy** + stacking boost multipliers.",
+            f"• `{p}boosters` (or `{p}boosterlist`) — View all server boosters & current server boost level.",
+            f"• `{p}booster shop` — Browse the booster shop catalog (Cooldown Skips, Auto-Claim Passes, 2x Earnings).",
+            f"• `{p}booster buy <item_id>` — Buy exclusive booster items with uwuncy.",
+            f"",
+            f"⚡ **Booster Passive Perks:**",
+            f"• **0 Command Cooldowns**: Bypasses all standard command cooldown limits.",
+            f"• **Auto-Claim Pass**: Automatically collects your 5T daily reward when chatting.",
+            f"• **Filter Bypass**: Bypasses link and image filters in restricted channels."
+        ]
+    else:
+        lines = [f"UwU Help — {cat_obj['title']}", ""]
+        if is_booster:
+            lines.append("⚡ *As a Server Booster, all command cooldowns are 0 seconds for you!*")
+            lines.append("")
+        lines.extend(format_category(matched_key, cat_obj))
+
     for chunk in split_chunks(lines):
         await ctx.send(chunk)
 
