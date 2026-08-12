@@ -22956,9 +22956,9 @@ async def reset_all_uwuncy(ctx, confirmation: str = None):
 # 🚀 RUN
 # ==============================================
 def run_bot():
-    token = os.environ.get("DISCORD_BOT_TOKEN")
+    token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
     if not token:
-        raise RuntimeError("DISCORD_BOT_TOKEN secret is not configured")
+        raise RuntimeError("DISCORD_BOT_TOKEN (or DISCORD_TOKEN) secret is not configured")
     acquire_bot_lease()
     heartbeat = threading.Thread(target=refresh_bot_lease, daemon=True)
     heartbeat.start()
