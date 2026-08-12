@@ -2889,7 +2889,9 @@ async def profile_cmd(ctx, member: discord.Member = None):
     partner_id = member_data.get("marriage_partner_id")
     if partner_id:
         marriage_level = member_data.get("marriage_level", 0)
-        marriage_str = f"<@{partner_id}> (Level {marriage_level})"
+        partner_data = get_user(partner_id)
+        shared_wealth = member_data.get("wallet", 0) + member_data.get("bank", 0) + partner_data.get("wallet", 0) + partner_data.get("bank", 0)
+        marriage_str = f"<@{partner_id}> (Level {marriage_level}) • 💰 Household: `{format_coins(shared_wealth)}` uwuncy"
     else:
         marriage_str = "Single"
 
@@ -4110,9 +4112,13 @@ async def marry_cmd(ctx, *, arg: str = None):
         save_data(DATA)
         MARRIAGE_PROPOSALS.pop(user_id_str, None)
 
+        combined_wealth = user["wallet"] + user["bank"] + proposer_user["wallet"] + proposer_user["bank"]
+
         return await ctx.send(
             f"💍 🎉 **JUST MARRIED!** {ctx.author.mention} accepted <@{proposer_id}>'s marriage proposal!\n"
-            f"Marriage badge: **{badge}**. Level up your bond by using `uwu marry <@{proposer_id}>`."
+            f"• Marriage Badge: **{badge}**\n"
+            f"• 💰 **Shared Household Wealth:** `{format_coins(combined_wealth)}` uwuncy\n"
+            f"• View your joint balance anytime with `uwu bal` or `uwu profile`!"
         )
 
     # 2. Handle DECLINE / DENY / NO
@@ -17625,10 +17631,28 @@ async def money(ctx):
     if not user["crypto_private"]:
         _crypto_rows, _crypto_invested, crypto_value, _crypto_profit = crypto_portfolio(user)
         crypto_line = f"\n**{format_crypto_price(crypto_value)} Crypto held value**"
+
+    marriage_line = ""
+    partner_id = user.get("marriage_partner_id")
+    if partner_id:
+        partner_user = get_user(partner_id)
+        partner_wallet = partner_user.get("wallet", 0)
+        partner_bank = partner_user.get("bank", 0)
+        shared_total = user["wallet"] + user["bank"] + partner_wallet + partner_bank
+        try:
+            partner_member = await bot.fetch_user(int(partner_id))
+            partner_name = partner_member.display_name
+        except Exception:
+            partner_name = f"Partner ({partner_id})"
+        marriage_line = (
+            f"\n💍 **Married to {partner_name}** | Partner Wallet: `{format_coins(partner_wallet)}` | "
+            f"**Shared Household Total:** `{format_coins(shared_total)} uwuncy`"
+        )
+
     await ctx.send(
         f"🍁 **{ctx.author.display_name}**, you currently have "
-        f"**{format_coins(user['wallet'])} uwuncy**!\n"
-        f"{crypto_line}"
+        f"**{format_coins(user['wallet'])} uwuncy** in wallet (`{format_coins(user['bank'])}` in bank)!\n"
+        f"{crypto_line}{marriage_line}"
     )
 
 
