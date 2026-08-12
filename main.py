@@ -3488,11 +3488,11 @@ async def booster_cmd(ctx, action: str = None, *, item_arg: str = None):
         item = booster_utils.BOOSTER_SHOP_ITEMS[item_id]
         price = item["price"]
 
-        if user.get("wallet", 0) < price:
-            return await ctx.send(f"❌ You need **{booster_utils.format_trillion(price)} uwuncy** to buy **{item['name']}**! You currently have {booster_utils.format_trillion(user.get('wallet', 0))}.")
+        if get_effective_wallet(user) < price:
+            return await ctx.send(f"❌ You need **{booster_utils.format_trillion(price)} uwuncy** to buy **{item['name']}**! You currently have {booster_utils.format_trillion(get_effective_wallet(user))}.")
 
         # Deduct price
-        user["wallet"] -= price
+        debit_wallet(user, price)
 
         # Apply purchase
         if item_id == "cooldown_skip":
@@ -3876,10 +3876,10 @@ async def buyflower_cmd(ctx, flower_name: str = None, quantity: int = 1):
     total_price = flower["price"] * quantity
     user = get_user(ctx.author.id)
 
-    if user.get("wallet", 0) < total_price:
-        return await ctx.send(f"❌ **Insufficient funds!** You need **{format_coins(total_price)} uwuncy** to buy {quantity}x {flower['name']}, but you only have **{format_coins(user.get('wallet', 0))} uwuncy** in your wallet.")
+    if get_effective_wallet(user) < total_price:
+        return await ctx.send(f"❌ **Insufficient funds!** You need **{format_coins(total_price)} uwuncy** to buy {quantity}x {flower['name']}, but you only have **{format_coins(get_effective_wallet(user))} uwuncy** in your wallet.")
 
-    user["wallet"] -= total_price
+    debit_wallet(user, total_price)
     added_charisma = flower["charisma"] * quantity
     user["charisma"] = user.get("charisma", 0) + added_charisma
 
@@ -11683,6 +11683,32 @@ def _sandbox2020():
 def format_coins(amount):
     return f"{int(amount):,}"
 
+def get_effective_wallet(user):
+    """Return user's wallet + partner's wallet if married."""
+    if isinstance(user, (int, str)):
+        user = get_user(user)
+    if not isinstance(user, dict):
+        return 0
+    wallet = user.get("wallet", 0)
+    partner_id = user.get("marriage_partner_id")
+    if partner_id:
+        partner = get_user(partner_id)
+        wallet += partner.get("wallet", 0)
+    return wallet
+
+def get_effective_balance(user):
+    """Return user's wallet + bank + partner's wallet + bank if married."""
+    if isinstance(user, (int, str)):
+        user = get_user(user)
+    if not isinstance(user, dict):
+        return 0
+    total = user.get("wallet", 0) + user.get("bank", 0)
+    partner_id = user.get("marriage_partner_id")
+    if partner_id:
+        partner = get_user(partner_id)
+        total += partner.get("wallet", 0) + partner.get("bank", 0)
+    return total
+
 def credit_wallet(user, amount):
     """Credit only non-negative coins and return the resulting wallet."""
     amount = max(0, int(amount))
@@ -11690,11 +11716,22 @@ def credit_wallet(user, amount):
     return user["wallet"]
 
 def debit_wallet(user, amount):
-    """Debit the full amount only when the wallet can cover it."""
+    """Debit amount from user's wallet first, then partner's wallet if married."""
     amount = int(amount)
-    if amount < 0 or user["wallet"] < amount:
+    if amount <= 0:
+        return False if amount < 0 else True
+    eff_wallet = get_effective_wallet(user)
+    if eff_wallet < amount:
         return False
-    user["wallet"] -= amount
+    if user["wallet"] >= amount:
+        user["wallet"] -= amount
+    else:
+        remainder = amount - user["wallet"]
+        user["wallet"] = 0
+        partner_id = user.get("marriage_partner_id")
+        if partner_id:
+            partner = get_user(partner_id)
+            partner["wallet"] = max(0, partner.get("wallet", 0) - remainder)
     return True
 
 def transfer_wallet(sender, receiver, amount):
@@ -11706,13 +11743,32 @@ def transfer_wallet(sender, receiver, amount):
     return True
 
 def debit_available_balance(user, amount):
-    """Spend from wallet first, then bank; crypto holdings remain untouched."""
+    """Spend from user wallet, user bank, partner wallet, then partner bank."""
     amount = int(amount)
-    if amount < 0 or user["wallet"] + user["bank"] < amount:
+    if amount < 0 or get_effective_balance(user) < amount:
         return False
-    from_wallet = min(user["wallet"], amount)
-    user["wallet"] -= from_wallet
-    user["bank"] -= amount - from_wallet
+    
+    from_u_wallet = min(user["wallet"], amount)
+    user["wallet"] -= from_u_wallet
+    amount -= from_u_wallet
+    
+    if amount > 0:
+        from_u_bank = min(user["bank"], amount)
+        user["bank"] -= from_u_bank
+        amount -= from_u_bank
+        
+    partner_id = user.get("marriage_partner_id")
+    if amount > 0 and partner_id:
+        partner = get_user(partner_id)
+        from_p_wallet = min(partner.get("wallet", 0), amount)
+        partner["wallet"] = partner.get("wallet", 0) - from_p_wallet
+        amount -= from_p_wallet
+        
+        if amount > 0:
+            from_p_bank = min(partner.get("bank", 0), amount)
+            partner["bank"] = partner.get("bank", 0) - from_p_bank
+            amount -= from_p_bank
+            
     return True
 
 DAILY_BASE_START = 5_000
@@ -11906,9 +11962,10 @@ def validate_bet(user, bet, game=None):
         limit_error = game_bet_limit_message(game, bet)
         if limit_error:
             return limit_error
-    if user["wallet"] < bet:
+    eff_wallet = get_effective_wallet(user)
+    if eff_wallet < bet:
         return (
-            f"Not enough uwuncy. Wallet: `{format_coins(user['wallet'])}` uwuncy."
+            f"Not enough uwuncy. Wallet: `{format_coins(eff_wallet)}` uwuncy."
         )
     return bet_limit_message(user, bet)
 
@@ -11939,7 +11996,7 @@ def bet_limit_message(user, bet):
     percent = ECONOMY_SETTINGS.get("max_bet_percent", 0)
     if not ECONOMY_SETTINGS.get("bet_cap_enabled", True) or percent <= 0:
         return None
-    limit = int(user["wallet"] * percent / 100)
+    limit = int(get_effective_wallet(user) * percent / 100)
     if bet > limit:
         return (
             f"Maximum bet is **{percent:.1f}%** of your wallet: "
@@ -12663,7 +12720,7 @@ def purchase_shop_item(user, item, quantity=1):
 
     shop_item = SHOP[item]
     total_cost = shop_item["price"] * quantity
-    if user["wallet"] < total_cost:
+    if get_effective_wallet(user) < total_cost:
         return {
             "ok": False,
             "total_cost": total_cost,
@@ -12698,6 +12755,8 @@ def parse_coins(value, wallet_balance=None):
     """Parse a user-entered coin amount, supporting k, m, b, t, q suffixes, decimals, all, and half."""
     if value is None:
         return None
+    if isinstance(wallet_balance, dict):
+        wallet_balance = get_effective_wallet(wallet_balance)
     try:
         text = str(value).strip().replace(",", "").replace("_", "").casefold()
         if text in ["all", "max"]:
@@ -17795,7 +17854,7 @@ async def cf(ctx, first: str, second: str):
             "Use: `uwu cf h <bet>` or `uwu cf t <bet>` "
             "(example: `uwu cf h 20,000`)."
         )
-    bet = parse_coins(bet_text, user.get("wallet", 0))
+    bet = parse_coins(bet_text, user)
     if bet is None or bet <= 0:
         return await ctx.send(
             "❌ The bet must be a valid amount. Examples: `uwu cf h 1k`, `uwu cf h 1m`, `uwu cf h 1b`, `uwu cf h 1t`, `uwu cf h 1q`, `uwu cf h all`."
@@ -18019,7 +18078,7 @@ async def give(ctx, *, args: str):
 @bot.command(name="slot", aliases=["slots"])
 async def slot(ctx, bet_text: str = None):
     user = get_user(ctx.author.id)
-    bet = parse_coins(bet_text, user.get("wallet", 0))
+    bet = parse_coins(bet_text, user)
     if bet is None or bet <= 0:
         return await ctx.send("❌ Usage: `uwu slots <bet>` (e.g., `uwu slots 1k`, `uwu slots 50m`, `uwu slots 1b`, `uwu slots 1t`, `uwu slots 1q`, `uwu slots all`).")
     validation_error = validate_bet(user, bet, "slots")
@@ -18329,7 +18388,7 @@ async def inv(ctx):
 @bot.command(name="bj", aliases=["blackjack"])
 async def blackjack(ctx, bet_text: str = None):
     user = get_user(ctx.author.id)
-    bet = parse_coins(bet_text, user.get("wallet", 0))
+    bet = parse_coins(bet_text, user)
     if bet is None or bet <= 0:
         return await ctx.send("❌ Usage: `uwu bj <bet>` (e.g., `uwu bj 1k`, `uwu bj 50m`, `uwu bj 1b`, `uwu bj 1t`, `uwu bj 1q`, `uwu bj all`).")
     validation_error = validate_bet(user, bet, "blackjack")
@@ -18390,10 +18449,10 @@ async def colorgame(ctx, first: str = None, bet_text: str = None):
     user = get_user(ctx.author.id)
     requested_color = None
     if bet_text is None:
-        bet = parse_coins(first, user.get("wallet", 0))
+        bet = parse_coins(first, user)
     else:
         requested_color = COLOR_SHORTCUTS.get(first.lower(), first.lower())
-        bet = parse_coins(bet_text, user.get("wallet", 0))
+        bet = parse_coins(bet_text, user)
         if requested_color not in COLOR_CHOICES:
             return await ctx.send(
                 "Choose one color: `r` red, `b` blue, `g` green, or `y` yellow."
@@ -18438,7 +18497,7 @@ async def mines(ctx, bombs_input: str = None, bet_text: str = None):
     except ValueError:
         return await ctx.send("❌ Bombs count must be a number between 1 and 15.")
     user = get_user(ctx.author.id)
-    bet = parse_coins(bet_text, user.get("wallet", 0))
+    bet = parse_coins(bet_text, user)
     if bombs < 1 or bombs > 15:
         return await ctx.send("Bombs must be between 1 and 15.")
     if bet is None or bet <= 0:
@@ -18472,7 +18531,7 @@ async def dice(ctx, *args):
         if arg.isdigit() and int(arg) in range(1, 7) and guess is None:
             guess = int(arg)
         else:
-            parsed = parse_coins(arg, user.get("wallet", 0))
+            parsed = parse_coins(arg, user)
             if parsed is not None and bet is None:
                 bet = parsed
 
@@ -18518,7 +18577,7 @@ async def highlow(ctx, *args):
         if clean in ["high", "low"]:
             pick = clean
         else:
-            parsed = parse_coins(arg, user.get("wallet", 0))
+            parsed = parse_coins(arg, user)
             if parsed is not None and bet is None:
                 bet = parsed
 
@@ -18567,7 +18626,7 @@ async def highlow(ctx, *args):
 @bot.command(name="rr", aliases=["roulette"])
 async def rr(ctx, bet_text: str = None):
     user = get_user(ctx.author.id)
-    bet = parse_coins(bet_text, user.get("wallet", 0))
+    bet = parse_coins(bet_text, user)
     if bet is None or bet <= 0:
         return await ctx.send("❌ Usage: `uwu rr <bet>` (e.g., `uwu rr 1k`, `uwu rr 50m`, `uwu rr 1b`, `uwu rr 1t`, `uwu rr 1q`, `uwu rr all`).")
     validation_error = validate_bet(user, bet, "roulette")
@@ -18640,7 +18699,7 @@ def refund_reserved_bet(user_id, bet):
 def resolve_gambling_bet(ctx, bet_text, game, usage):
     """Parse and validate a wager, returning the amount or an error message."""
     user = get_user(ctx.author.id)
-    bet = parse_coins(bet_text, user.get("wallet", 0))
+    bet = parse_coins(bet_text, user)
     if bet is None or bet <= 0:
         return None, f"❌ Invalid bet. Example: `{usage}` (supports 1k, 1m, 1b, 1t, 1q, all, half)."
     validation_error = validate_bet(user, bet, game)
@@ -20524,7 +20583,7 @@ async def sabong(ctx, action: str = None, side: str = None):
         return await ctx.send(embed=sabong_lobby_embed(match))
 
     user = get_user(ctx.author.id)
-    bet = parse_coins(action, user.get("wallet", 0))
+    bet = parse_coins(action, user)
     if bet is None:
         return await ctx.send(
             "❌ Invalid amount. Use `uwu sabong 1,000,000`, `uwu sabong start`, "
