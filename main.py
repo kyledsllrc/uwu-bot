@@ -12906,6 +12906,231 @@ ARENA_BUGTONG_RIDDLES = (
         "answer": "BALON",
         "choices": ("BALON", "TASA", "BINTANA"),
     },
+    {
+        "prompt": "KUNG KAILAN MO PINATAY, SAKA PA HUMABA ANG BUHAY",
+        "answer": "KANDILA",
+        "choices": ("KANDILA", "POSPORO", "SIGARILYO"),
+    },
+    {
+        "prompt": "ISANG BUTIL NG PALAY, SAKOP ANG BUONG BAHAY",
+        "answer": "ILAW",
+        "choices": ("ILAW", "BATO", "SAMPAGUITA"),
+    },
+    {
+        "prompt": "HETO NA SI KAKA, BUMAKAKA NG KUSANG-LOOB",
+        "answer": "GUNTING",
+        "choices": ("GUNTING", "SIPIT", "PAYONG"),
+    },
+    {
+        "prompt": "NANG MALIIT AY MAY BUNTOT, NANG LUMAKI AY WALANG BUNTOT",
+        "answer": "PALAKA",
+        "choices": ("PALAKA", "ISDA", "AHAS"),
+    },
+    {
+        "prompt": "AKO AY MAY KAIBIGAN, KASAMA KO KAHIT SAAN, PERO NAWAWALA KUNG DILIM",
+        "answer": "ANINO",
+        "choices": ("ANINO", "PAYONG", "SAPATOS"),
+    },
+    {
+        "prompt": "KUNG UMAMBON O UMULAN, PINAYUNGAN KA MAN AY BASA RIN",
+        "answer": "ISDA",
+        "choices": ("ISDA", "BATO", "BANGKA"),
+    },
+    {
+        "prompt": "DALA MO, DALA KA, DALA KA PA NG IYONG DALA",
+        "answer": "SAPATOS",
+        "choices": ("SAPATOS", "PAYONG", "TSINELAS"),
+    },
+    {
+        "prompt": "LUMALAKAD NA WALANG PAA, UMIISIP NA WALANG ULO",
+        "answer": "ORASAN",
+        "choices": ("ORASAN", "TUBIG", "HANGIN"),
+    },
+    {
+        "prompt": "MATAAS KUNG NAKAUPO, MABABA KUNG NAKATAYO",
+        "answer": "ASO",
+        "choices": ("ASO", "PUSA", "KABAYO"),
+    },
+    {
+        "prompt": "MAY MGA MATA NGUNIT HINDI NAKAKAKITA",
+        "answer": "PINYA",
+        "choices": ("PINYA", "SAGING", "PAKWAN"),
+    },
+    {
+        "prompt": "MAY TAPON PERO WALANG BOTE, MAY PUSO PERO WALANG BUHAY",
+        "answer": "SAGING",
+        "choices": ("SAGING", "MANGGA", "PAPAYA"),
+    },
+    {
+        "prompt": "ISANG PULONG MARAMING TINIK, KULAY BERDE AT MATAMIS PAG HINOG",
+        "answer": "LANGKA",
+        "choices": ("LANGKA", "DURIAN", "PINYA"),
+    },
+    {
+        "prompt": "HINDI TAO, HINDI HAYOP, MAY DILA NGUNIT HINDI NAKAKASALITA",
+        "answer": "SAPATOS",
+        "choices": ("SAPATOS", "KAMPANA", "KUTSARA"),
+    },
+    {
+        "prompt": "KUNG BUMILI AKO NG ITIM, GINAMIT KO NG PULA, NANG ITAPON KO AY PUTI",
+        "answer": "ULING",
+        "choices": ("ULING", "KANDILA", "SABON"),
+    },
+    {
+        "prompt": "PAG-UPONG KUMPADRE, LUMALABAS ANG BUNTOT",
+        "answer": "PUSA",
+        "choices": ("PUSA", "ASO", "KABAYO"),
+    },
+    {
+        "prompt": "BAHAY NI SAN GABRIEL, HINDI MAPASUKAN NG HANGIN",
+        "answer": "ITLOG",
+        "choices": ("ITLOG", "NIYOG", "SAGING"),
+    },
+    {
+        "prompt": "ISANG BALON SA BUNDOK, PUNO NG MGA LALAMUNAN",
+        "answer": "BIBIG",
+        "choices": ("BIBIG", "ILONG", "TAEN"),
+    },
+    {
+        "prompt": "KUNG GABI AY DAGAT, KUNG ARAW AY MUNTING ILOG",
+        "answer": "BANIG",
+        "choices": ("BANIG", "SULAT", "KAMA"),
+    },
+    {
+        "prompt": "KAY MALIIT PA SI KAKA, MARUNONG NANG PUMUTOK",
+        "answer": "POSPORO",
+        "choices": ("POSPORO", "KANDILA", "BOMBA"),
+    },
+    {
+        "prompt": "TUBIG SA DULONG KAWAYAN, WALANG HANGIN AY GUMAGALAW",
+        "answer": "LUHA",
+        "choices": ("LUHA", "ULAN", "TUBIG"),
+    },
+    {
+        "prompt": "MAY ROONG ULO WALANG BUHOK, MAY ROONG PAA WALANG SAPATOS",
+        "answer": "PAKO",
+        "choices": ("PAKO", "TALONG", "KANDILA"),
+    },
+    {
+        "prompt": "HINDI TAO, HINDI HAYOP, NAGSUBO NG SARILING BUNTOT",
+        "answer": "SINGSING",
+        "choices": ("SINGSING", "KWINTAS", "GULONG"),
+    },
+    {
+        "prompt": "NANG HAWAKAN KO'Y BUHAY, NANG BITAWAN KO'Y PATAY",
+        "answer": "SARANGGOLA",
+        "choices": ("SARANGGOLA", "PAYONG", "KAPOTE"),
+    },
+    {
+        "prompt": "DALAWANG BASO, PUNONG-PUNO NG TUBIG, HINDI NATATAPON KAHIT BALIKTARIN",
+        "answer": "MATA",
+        "choices": ("MATA", "ILONG", "TAEN"),
+    },
+    {
+        "prompt": "MATAMIS PAG HINOG, MAASIM PAG HILAW, PABORITO NG MGA PILIPINO",
+        "answer": "MANGGA",
+        "choices": ("MANGGA", "SAGING", "SAMPALOK"),
+    },
+    {
+        "prompt": "TINIKAN ANG PALIGID, MATAMIS AT MABANGO ANG LOOB",
+        "answer": "RAMBUTAN",
+        "choices": ("RAMBUTAN", "LANGKA", "DURIAN"),
+    },
+    {
+        "prompt": "MALIIT NA BAHAY, PUNO NG MGA LALAKI AT KANDILA SA ULO",
+        "answer": "POSPORO",
+        "choices": ("POSPORO", "KANDILA", "KAHON"),
+    },
+    {
+        "prompt": "PALAISIPAN NI SAN JUAN, NAKAUPO SA PALAYOK",
+        "answer": "KASUY",
+        "choices": ("KASUY", "SAGING", "MANGGA"),
+    },
+    {
+        "prompt": "LUMALAKAD KAHIT WALANG PAA, UMIYAK KAHIT WALANG MATA",
+        "answer": "ULAP",
+        "choices": ("ULAP", "HANGIN", "BAGYO"),
+    },
+    {
+        "prompt": "LUMALABAS KUNG GABI, SA UMAGA AY NAWAWALA",
+        "answer": "BITUIN",
+        "choices": ("BITUIN", "ARAW", "ULAP"),
+    },
+    {
+        "prompt": "MAY NGIPIN PERO HINDI NAKAKAGAT",
+        "answer": "SUKLAY",
+        "choices": ("SUKLAY", "GUNTING", "SOPAS"),
+    },
+    {
+        "prompt": "MALIIT NA TAO, LALAKAD-LALAKAD, MAY BITBIT NA BAHAY",
+        "answer": "KUHOL",
+        "choices": ("KUHOL", "PAGONG", "LANGGAM"),
+    },
+    {
+        "prompt": "KUNG KAILAN HINDI PUMUTOK, SAKA NAWASAK",
+        "answer": "ITLOG",
+        "choices": ("ITLOG", "BOMBA", "PAYONG"),
+    },
+    {
+        "prompt": "NAGSUOT NG CORONA, PERO HINDI REYNA",
+        "answer": "PINYA",
+        "choices": ("PINYA", "MANGGA", "SAGING"),
+    },
+    {
+        "prompt": "BAHAY NG KAPITAN, KAHIT SAAN AY MAY BINTANA",
+        "answer": "PAYONG",
+        "choices": ("PAYONG", "KAHON", "SALAMIN"),
+    },
+    {
+        "prompt": "MAY PAA WALANG BUNTOT, MAY PAKPAK WALANG ULO",
+        "answer": "PAYONG",
+        "choices": ("PAYONG", "SARANGGOLA", "GUNTING"),
+    },
+    {
+        "prompt": "ISANG PISON NA GUMAGAPANG SA LUPA, MAY PUSTURA PERO DALA ANG TAHANAN",
+        "answer": "PAGONG",
+        "choices": ("PAGONG", "KUHOL", "AHAS"),
+    },
+    {
+        "prompt": "MAY ROONG TAPON SA ITAAS, MAY ROONG TUBIG SA LOOB",
+        "answer": "NIYOG",
+        "choices": ("NIYOG", "PAKWAN", "BOTE"),
+    },
+    {
+        "prompt": "LUMILIPAD NA WALANG PAKPAK, UMIYAK NA WALANG MATA",
+        "answer": "HANGIN",
+        "choices": ("HANGIN", "ULAP", "ILOG"),
+    },
+    {
+        "prompt": "SAMPUNG KUMPADRE, NAGTATAGUAN SA LOOB NG SAPATOS",
+        "answer": "DALIRI",
+        "choices": ("DALIRI", "MEDYAS", "KUTU"),
+    },
+    {
+        "prompt": "ISANG PUNO NG KATIPAN, NAGBUNGA NG SANTA KLAUS",
+        "answer": "KAPOK",
+        "choices": ("KAPOK", "KOTON", "SAMPALOK"),
+    },
+    {
+        "prompt": "MAY LEEG PERO WALANG ULO, MAY KATAWAN PERO WALANG PAA",
+        "answer": "DAMIT",
+        "choices": ("DAMIT", "BOTE", "SAPATOS"),
+    },
+    {
+        "prompt": "ISANG BOTE NG PARE, HINDI MABUKSAN NG WALANG SUSI",
+        "answer": "PADLOCK",
+        "choices": ("PADLOCK", "KAHON", "PINTO"),
+    },
+    {
+        "prompt": "KAPAG HINIPAN MO AY LALAKING BIGLA, KAPAG PINUTOK AY NAWAWALA",
+        "answer": "LOBO",
+        "choices": ("LOBO", "BOMBA", "PLASTIK"),
+    },
+    {
+        "prompt": "NAKAPAKO SA DINGDING, PERO NAKAKATULONG MAGTURO NG PETSA",
+        "answer": "KALENDARYO",
+        "choices": ("KALENDARYO", "ORASAN", "SALAMIN"),
+    },
 )
 
 def load_arenas():
@@ -13522,12 +13747,19 @@ def reroll_arena_mines_round(arena, round_state):
 
 def arena_prepare_bugtong_round(round_state, arena=None):
     """Attach one Filipino riddle and two bot-selected team representatives."""
-    previous_prompt = round_state.get("bugtong_prompt")
+    used_prompts = round_state.get("used_bugtong_prompts", [])
     available = [
         riddle for riddle in ARENA_BUGTONG_RIDDLES
-        if riddle["prompt"] != previous_prompt
-    ] or list(ARENA_BUGTONG_RIDDLES)
+        if riddle["prompt"] not in used_prompts
+    ]
+    if not available:
+        used_prompts = []
+        available = list(ARENA_BUGTONG_RIDDLES)
+    
     riddle = random.choice(available)
+    used_prompts.append(riddle["prompt"])
+    round_state["used_bugtong_prompts"] = used_prompts
+
     choices = list(riddle["choices"])
     random.shuffle(choices)
     round_state["bugtong_prompt"] = riddle["prompt"]
