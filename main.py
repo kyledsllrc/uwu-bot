@@ -17644,10 +17644,7 @@ async def money(ctx):
             partner_name = partner_member.display_name
         except Exception:
             partner_name = f"Partner ({partner_id})"
-        marriage_line = (
-            f"\n💍 **Married to {partner_name}** • Partner: `{format_coins(partner_wallet)}` • "
-            f"Joint: `{format_coins(shared_total)} uwuncy`"
-        )
+        marriage_line = f"\n💍 **Married to {partner_name}** • Partner: `{format_coins(partner_wallet)}` • Joint: `{format_coins(shared_total)}`"
 
     await ctx.send(
         f"🍁 **{ctx.author.display_name}**, you currently have "
@@ -22252,7 +22249,9 @@ async def help_cmd(ctx, category: str = None):
     if not requested:
         if is_booster:
             srv_boosts = getattr(ctx.guild, "premium_subscription_count", 0) if ctx.guild else 0
+            active_boosters = len(booster_utils.get_guild_boosters(ctx.guild)) if ctx.guild else 0
             usr_boosts = booster_utils.get_user_boost_count(ctx.author)
+            total_server_boosts = max(srv_boosts, active_boosters)
             lines = [
                 f"💎 ════════════════════════════════════════ 💎",
                 f"⚡ **VIP SERVER BOOSTER HELP MENU** ⚡",
@@ -22264,7 +22263,8 @@ async def help_cmd(ctx, category: str = None):
                 f"• ⚡ **Command Cooldowns:** `BYPASSED (0s cooldowns on all commands)`",
                 f"• 🖼️ **Links & Media:** `BYPASSED` in restricted channels",
                 f"• 🛒 **Booster Shop Catalog:** `UNLOCKED` (`{p}booster shop`)",
-                f"• 💎 **Server Total Boosts:** `{srv_boosts} Boost(s)`",
+                f"• 💎 **Server Total Boosts:** `{total_server_boosts} Boost(s)`",
+                f"• 👥 **Active Server Boosters:** `{active_boosters} Member(s)`",
                 f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)`",
                 f"",
                 f"Use `{p}help <category>` to view a specific section.",
