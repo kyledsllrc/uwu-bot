@@ -75,6 +75,26 @@ bot = commands.Bot(
 def is_owner(ctx):
     return str(ctx.author.id) == BOT_OWNER_ID
 
+def is_mod_or_admin(ctx):
+    if is_owner(ctx):
+        return True
+    if not hasattr(ctx, 'author') or not ctx.author:
+        return False
+    if hasattr(ctx, 'guild') and ctx.guild and getattr(ctx.author, 'id', None) == getattr(ctx.guild, 'owner_id', None):
+        return True
+    perms = getattr(ctx.author, 'guild_permissions', None)
+    if perms:
+        return bool(
+            getattr(perms, 'administrator', False) or
+            getattr(perms, 'manage_guild', False) or
+            getattr(perms, 'kick_members', False) or
+            getattr(perms, 'ban_members', False) or
+            getattr(perms, 'manage_messages', False) or
+            getattr(perms, 'moderate_members', False) or
+            getattr(perms, 'manage_channels', False)
+        )
+    return False
+
 CATEGORY_ALIASES = {
     "social": "socials",
     "socials": "socials",
@@ -4008,6 +4028,8 @@ async def play_cmd(ctx, *, search: str):
             vc = await ctx.author.voice.channel.connect(
                 cls=wavelink.Player
             )
+            if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
+                vc.autoplay = wavelink.AutoPlay.enabled
         except Exception as err:
             return await ctx.send(f"❌ Could not connect to voice channel: {err}")
     elif vc.channel != ctx.author.voice.channel:
@@ -4015,6 +4037,9 @@ async def play_cmd(ctx, *, search: str):
             await vc.move_to(ctx.author.voice.channel)
         except Exception:
             pass
+
+    if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
+        vc.autoplay = wavelink.AutoPlay.enabled
 
     try:
         if hasattr(wavelink.Playable, 'search'):
@@ -4182,6 +4207,49 @@ async def volume_cmd(ctx, level: int = None):
 @bot.event
 async def on_wavelink_node_disconnected(node):
     print(f"⚠️ Node disconnected: {getattr(node, 'uri', 'Node')} → Auto-switching to next...")
+
+
+@bot.event
+async def on_wavelink_track_end(payload):
+    try:
+        player = getattr(payload, 'player', None)
+        if not player or not hasattr(player, 'queue'):
+            return
+        if not player.queue.is_empty and not getattr(player, 'playing', False):
+            next_track = player.queue.get()
+            res = player.play(next_track)
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as exc:
+        print(f"⚠️ Error in on_wavelink_track_end: {exc}")
+
+
+@bot.event
+async def on_wavelink_track_exception(payload):
+    try:
+        player = getattr(payload, 'player', None)
+        track = getattr(payload, 'track', None)
+        print(f"⚠️ Track exception for '{getattr(track, 'title', 'unknown')}': {getattr(payload, 'exception', '')}")
+        if player and hasattr(player, 'queue') and not player.queue.is_empty:
+            next_track = player.queue.get()
+            res = player.play(next_track)
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as exc:
+        print(f"⚠️ Error in on_wavelink_track_exception: {exc}")
+
+
+@bot.event
+async def on_wavelink_track_stuck(payload):
+    try:
+        player = getattr(payload, 'player', None)
+        if player and hasattr(player, 'queue') and not player.queue.is_empty:
+            next_track = player.queue.get()
+            res = player.play(next_track)
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as exc:
+        print(f"⚠️ Error in on_wavelink_track_stuck: {exc}")
 
 
 @bot.command(name='lyrics')
@@ -23269,12 +23337,18 @@ async def help_cmd(ctx, category: str = None):
         },
     }
 
+    is_bot_owner = is_owner(ctx)
+    is_server_mod = is_mod_or_admin(ctx)
+
     available_categories = []
     order = ["booster", "economy", "gambling", "social", "music", "moderation", "admin"]
     for key in order:
         if key in HELP_CATEGORIES:
             if key == "admin":
-                if is_owner(ctx):
+                if is_bot_owner:
+                    available_categories.append(key)
+            elif key == "moderation":
+                if is_server_mod:
                     available_categories.append(key)
             elif key == "booster":
                 if is_booster:
@@ -23286,7 +23360,7 @@ async def help_cmd(ctx, category: str = None):
 
     if not requested:
         embed = build_help_main_embed(p, ctx.author, guild_name, is_booster, available_categories, HELP_CATEGORIES)
-        view = HelpView(HELP_CATEGORIES, available_categories, ctx.author.id, is_booster, is_owner(ctx), p, guild_name)
+        view = HelpView(HELP_CATEGORIES, available_categories, ctx.author.id, is_booster, is_bot_owner, p, guild_name)
         return await ctx.send(embed=embed, view=view)
 
     matched_key = None
@@ -23294,6 +23368,12 @@ async def help_cmd(ctx, category: str = None):
         if requested == key or requested in cat_obj["aliases"]:
             matched_key = key
             break
+
+    if matched_key == "admin" and not is_bot_owner:
+        return await ctx.send("❌ **Access Denied**: The Admin & Owner help category is reserved exclusively for the Bot Owner account!")
+
+    if matched_key == "moderation" and not is_server_mod:
+        return await ctx.send("❌ **Access Denied**: The Moderation help category is only visible and accessible to Server Owners and Server Moderators!")
 
     if matched_key == "booster" and not is_booster:
         return await ctx.send(
@@ -23310,7 +23390,7 @@ async def help_cmd(ctx, category: str = None):
 
     cat_obj = HELP_CATEGORIES[matched_key]
     embed = build_category_embed(matched_key, cat_obj, p, guild_name, is_booster)
-    view = HelpView(HELP_CATEGORIES, available_categories, ctx.author.id, is_booster, is_owner(ctx), p, guild_name)
+    view = HelpView(HELP_CATEGORIES, available_categories, ctx.author.id, is_booster, is_bot_owner, p, guild_name)
     await ctx.send(embed=embed, view=view)
 
 
