@@ -3671,6 +3671,324 @@ async def booster_cmd(ctx, action: str = None, *, item_arg: str = None):
         return await ctx.send("❌ Unknown booster subcommand! Available: `uwu booster`, `uwu booster shop`, `uwu booster buy <item_id>`, `uwu booster count <amount>`")
 
 
+# --- CUSTOM COMMANDS & MODERATOR HEADER COMMANDS SYSTEM ---
+
+def is_server_mod_or_owner(ctx):
+    """Check if invoker is Bot Owner, Server Owner, or Server Moderator."""
+    if is_owner(ctx):
+        return True
+    if ctx.guild is None:
+        return False
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    perms = ctx.author.guild_permissions
+    if perms.administrator or perms.manage_messages or perms.manage_guild or perms.kick_members or perms.ban_members:
+        return True
+    g_id = str(ctx.guild.id)
+    g_data = DATA.get("guilds", {}).get(g_id, {})
+    granted = g_data.get("granted_mods", [])
+    if str(ctx.author.id) in granted:
+        return True
+    granted_roles = g_data.get("granted_mod_roles", [])
+    if any(str(r.id) in granted_roles for r in getattr(ctx.author, "roles", [])):
+        return True
+    return False
+
+
+def parse_target_channel_and_text(ctx, text_arg: str, default_text: str = ""):
+    """Parse target channel (e.g. #general or channel ID/name) and remaining text."""
+    target_channel = ctx.channel
+    content_text = default_text
+
+    if not text_arg or not text_arg.strip():
+        return target_channel, content_text
+
+    text_arg = text_arg.strip()
+
+    # 1. Check if message has channel mentions
+    if ctx.message and ctx.message.channel_mentions:
+        first_mention = ctx.message.channel_mentions[0]
+        mention_str = f"<#{first_mention.id}>"
+        if text_arg.startswith(mention_str):
+            target_channel = first_mention
+            rem = text_arg[len(mention_str):].strip()
+            content_text = rem if rem else default_text
+            return target_channel, content_text
+
+    parts = text_arg.split(maxsplit=1)
+    first_part = parts[0]
+
+    # 2. Check channel ID or channel name
+    if ctx.guild:
+        ch = None
+        clean_name = first_part.lstrip("#")
+        if first_part.isdigit():
+            ch = ctx.guild.get_channel(int(first_part))
+        if not ch and clean_name:
+            ch = discord.utils.get(ctx.guild.text_channels, name=clean_name.lower())
+        if ch and isinstance(ch, discord.TextChannel):
+            target_channel = ch
+            content_text = parts[1].strip() if len(parts) > 1 and parts[1].strip() else default_text
+            return target_channel, content_text
+
+    content_text = text_arg
+    return target_channel, content_text
+
+
+@bot.command(name="gm", aliases=[",gm", "goodmorning", "uwugm"])
+async def gm_cmd(ctx, *, args: str = None):
+    """Send a large header Good Morning message to a target channel or current channel."""
+    if not is_server_mod_or_owner(ctx):
+        return await ctx.send("❌ Only Bot Owner, Server Owner, or Server Moderators can use this command!")
+
+    target_ch, text = parse_target_channel_and_text(ctx, args, default_text="GOOD MORNING YALL")
+    formatted = text if text.startswith("#") else f"# {text}"
+
+    try:
+        if ctx.guild and ctx.channel.permissions_for(ctx.guild.me).manage_messages:
+            await ctx.message.delete()
+    except Exception:
+        pass
+
+    await target_ch.send(formatted)
+
+
+@bot.command(name="gn", aliases=[",gn", "goodnight", "uwugn"])
+async def gn_cmd(ctx, *, args: str = None):
+    """Send a large header Good Night message to a target channel or current channel."""
+    if not is_server_mod_or_owner(ctx):
+        return await ctx.send("❌ Only Bot Owner, Server Owner, or Server Moderators can use this command!")
+
+    target_ch, text = parse_target_channel_and_text(ctx, args, default_text="GOOD NIGHT YALL")
+    formatted = text if text.startswith("#") else f"# {text}"
+
+    try:
+        if ctx.guild and ctx.channel.permissions_for(ctx.guild.me).manage_messages:
+            await ctx.message.delete()
+    except Exception:
+        pass
+
+    await target_ch.send(formatted)
+
+
+@bot.command(name="header", aliases=["h", "title", "heading"])
+async def header_cmd(ctx, *, args: str = None):
+    """Send a large header text message (# HEADER) to a target channel."""
+    if not is_server_mod_or_owner(ctx):
+        return await ctx.send("❌ Only Bot Owner, Server Owner, or Server Moderators can use this command!")
+    if not args or not args.strip():
+        return await ctx.send("❌ Please specify text to send! Example: `uwu header #general WELCOME TO OUR SERVER`")
+
+    target_ch, text = parse_target_channel_and_text(ctx, args, default_text="")
+    if not text:
+        return await ctx.send("❌ Please specify the text to display in the header!")
+
+    formatted = text if text.startswith("#") else f"# {text}"
+
+    try:
+        if ctx.guild and ctx.channel.permissions_for(ctx.guild.me).manage_messages:
+            await ctx.message.delete()
+    except Exception:
+        pass
+
+    await target_ch.send(formatted)
+
+
+@bot.command(name="say", aliases=["announce", "echo"])
+async def say_cmd(ctx, *, args: str = None):
+    """Send a custom message to a target channel or current channel."""
+    if not is_server_mod_or_owner(ctx):
+        return await ctx.send("❌ Only Bot Owner, Server Owner, or Server Moderators can use this command!")
+    if not args or not args.strip():
+        return await ctx.send("❌ Please specify a message! Example: `uwu say #general Hello everyone!`")
+
+    target_ch, text = parse_target_channel_and_text(ctx, args, default_text="")
+    if not text:
+        return await ctx.send("❌ Please specify a message!")
+
+    try:
+        if ctx.guild and ctx.channel.permissions_for(ctx.guild.me).manage_messages:
+            await ctx.message.delete()
+    except Exception:
+        pass
+
+    await target_ch.send(text)
+
+
+@bot.command(name="createcmd", aliases=["create", "addcmd", "customcmd", "createcommand", "newcmd"])
+async def createcmd_cmd(ctx, name_or_mode: str = None, *, response: str = None):
+    """Create a new custom command for your server.
+    Usage:
+      uwu createcmd <command_name> <response_text>
+      uwu createcmd header <command_name> <response_text>
+    Example:
+      uwu createcmd gm # GOOD MORNING YALL
+      uwu createcmd header welcome WELCOME TO OUR SERVER!
+    """
+    if not is_server_mod_or_owner(ctx):
+        return await ctx.send("❌ Only Bot Owner, Server Owner, or Server Moderators can create custom commands!")
+
+    if not name_or_mode:
+        return await ctx.send(
+            "❌ Please specify command name and text!\n"
+            "• Example: `uwu createcmd gm # GOOD MORNING YALL`\n"
+            "• Example (Header Mode): `uwu createcmd header welcome WELCOME TO OUR SERVER!`"
+        )
+
+    is_header = False
+    cmd_name = name_or_mode.lower().lstrip("!/,.#")
+
+    if cmd_name in ("header", "h", "--header") and response:
+        parts = response.split(maxsplit=1)
+        if len(parts) >= 1:
+            cmd_name = parts[0].lower().lstrip("!/,.#")
+            response = parts[1] if len(parts) > 1 else ""
+            is_header = True
+
+    if not response or not response.strip():
+        return await ctx.send("❌ Please specify the response text for the command!")
+
+    if not cmd_name or not cmd_name.isalnum():
+        return await ctx.send("❌ Command name must be alphanumeric (letters and numbers only, no spaces)!")
+
+    # Check built-in commands
+    if bot.get_command(cmd_name) and cmd_name not in ("gm", "gn", "header", "say"):
+        return await ctx.send(f"❌ `{cmd_name}` is a built-in bot command and cannot be overridden.")
+
+    resp_text = response.strip()
+    if is_header and not resp_text.startswith("#"):
+        resp_text = f"# {resp_text}"
+
+    guild_id = str(ctx.guild.id) if ctx.guild else "global"
+    if "custom_commands" not in DATA:
+        DATA["custom_commands"] = {}
+
+    if guild_id not in DATA["custom_commands"]:
+        DATA["custom_commands"][guild_id] = {}
+
+    DATA["custom_commands"][guild_id][cmd_name] = {
+        "response": resp_text,
+        "is_header": is_header or resp_text.startswith("#"),
+        "created_by": ctx.author.id,
+        "created_at": int(time.time()),
+    }
+    save_data(DATA)
+
+    preview = resp_text if len(resp_text) <= 100 else resp_text[:100] + "..."
+    await ctx.send(
+        f"✅ **Custom Command Created!**\n"
+        f"• **Command:** `{get_prefix()}{cmd_name}`\n"
+        f"• **Target Channel Support:** Typing `{get_prefix()}{cmd_name} #channel` sends it directly to that channel!\n"
+        f"• **Response Preview:** {preview}"
+    )
+
+
+@bot.command(name="deletecmd", aliases=["delcmd", "removecmd", "dropcmd"])
+async def deletecmd_cmd(ctx, cmd_name: str = None):
+    """Delete a custom command created in this server."""
+    if not is_server_mod_or_owner(ctx):
+        return await ctx.send("❌ Only Bot Owner, Server Owner, or Server Moderators can delete custom commands!")
+    if not cmd_name:
+        return await ctx.send("❌ Please specify the custom command name to delete! Example: `uwu deletecmd gm`")
+
+    cmd_key = cmd_name.lower().lstrip("!/,.#")
+    guild_id = str(ctx.guild.id) if ctx.guild else "global"
+
+    cmds = DATA.get("custom_commands", {}).get(guild_id, {})
+    if cmd_key not in cmds:
+        return await ctx.send(f"❌ Custom command `{cmd_key}` was not found in this server!")
+
+    del DATA["custom_commands"][guild_id][cmd_key]
+    save_data(DATA)
+    await ctx.send(f"🗑️ Custom command `{get_prefix()}{cmd_key}` has been deleted.")
+
+
+@bot.command(name="customcmds", aliases=["listcmds", "customcommands", "cmds"])
+async def customcmds_cmd(ctx):
+    """List all custom commands created for this server."""
+    guild_id = str(ctx.guild.id) if ctx.guild else "global"
+    cmds = DATA.get("custom_commands", {}).get(guild_id, {})
+
+    if not cmds:
+        return await ctx.send("📝 No custom commands have been created for this server yet. Use `uwu createcmd <name> <text>` to add one!")
+
+    embed = discord.Embed(
+        title=f"🛠️ Custom Commands for {ctx.guild.name if ctx.guild else 'Server'}",
+        color=discord.Color.blue(),
+        description="Run any custom command with optional channel target, e.g., `uwu <cmd> #channel`"
+    )
+    p = get_prefix()
+    lines = []
+    for name, info in cmds.items():
+        hdr = " [HEADER]" if info.get("is_header") else ""
+        resp = info.get("response", "")
+        short_resp = resp[:40] + ("..." if len(resp) > 40 else "")
+        lines.append(f"• `{p}{name}`{hdr} → {short_resp}")
+
+    embed.add_field(name="Available Commands", value="\n".join(lines[:25]), inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="grantmod", aliases=["addmod", "grantcmd", "setmod"])
+async def grantmod_cmd(ctx, target: Union[discord.Member, discord.Role] = None):
+    """Grant custom moderator command permissions to a member or role."""
+    if not is_owner(ctx) and not (ctx.guild and ctx.author.id == ctx.guild.owner_id):
+        return await ctx.send("❌ Only the Bot Owner or Server Owner can grant moderator command permissions!")
+    if not target:
+        return await ctx.send("❌ Please mention a member or role to grant moderator permissions! Example: `uwu grantmod @Moderator`")
+
+    guild_id = str(ctx.guild.id) if ctx.guild else "global"
+    guilds_dict = DATA.setdefault("guilds", {})
+    g_data = guilds_dict.setdefault(guild_id, {})
+
+    if isinstance(target, discord.Role):
+        roles_list = g_data.setdefault("granted_mod_roles", [])
+        r_id = str(target.id)
+        if r_id not in roles_list:
+            roles_list.append(r_id)
+        save_data(DATA)
+        await ctx.send(f"🛡️ Granted custom command moderator permissions to role **{target.name}**!")
+    else:
+        mods_list = g_data.setdefault("granted_mods", [])
+        m_id = str(target.id)
+        if m_id not in mods_list:
+            mods_list.append(m_id)
+        save_data(DATA)
+        await ctx.send(f"🛡️ Granted custom command moderator permissions to {target.mention}!")
+
+
+@bot.command(name="revokemod", aliases=["removemod", "delmod"])
+async def revokemod_cmd(ctx, target: Union[discord.Member, discord.Role] = None):
+    """Revoke custom moderator command permissions from a member or role."""
+    if not is_owner(ctx) and not (ctx.guild and ctx.author.id == ctx.guild.owner_id):
+        return await ctx.send("❌ Only the Bot Owner or Server Owner can revoke moderator command permissions!")
+    if not target:
+        return await ctx.send("❌ Please mention a member or role to revoke permissions! Example: `uwu revokemod @Member`")
+
+    guild_id = str(ctx.guild.id) if ctx.guild else "global"
+    g_data = DATA.get("guilds", {}).get(guild_id, {})
+
+    if isinstance(target, discord.Role):
+        roles_list = g_data.get("granted_mod_roles", [])
+        r_id = str(target.id)
+        if r_id in roles_list:
+            roles_list.remove(r_id)
+            save_data(DATA)
+            await ctx.send(f"🚫 Revoked custom command moderator permissions from role **{target.name}**.")
+        else:
+            await ctx.send("❌ Role was not in granted moderators list.")
+    else:
+        mods_list = g_data.get("granted_mods", [])
+        m_id = str(target.id)
+        if m_id in mods_list:
+            mods_list.remove(m_id)
+            save_data(DATA)
+            await ctx.send(f"🚫 Revoked custom command moderator permissions from {target.mention}.")
+        else:
+            await ctx.send("❌ Member was not in granted moderators list.")
+
+
+
 async def _music_play_next(ctx, guild_id: str):
 
     await play_next_track(guild_id)
@@ -17837,6 +18155,43 @@ async def on_message(message):
             return
     if await handle_user_info_suffix(message):
         return
+
+    # Check for server custom commands
+    content = (message.content or "").strip()
+    if content:
+        matched_prefix = None
+        for pref in PREFIX_VARIANTS + [get_prefix()]:
+            if content.casefold().startswith(pref.casefold()):
+                matched_prefix = pref
+                break
+
+        if matched_prefix:
+            after_pref = content[len(matched_prefix):].strip()
+            parts = after_pref.split(maxsplit=1)
+            if parts:
+                cmd_word = parts[0].lower().lstrip("!/,.#")
+                guild_id = str(message.guild.id) if message.guild else "global"
+                custom_cmds = DATA.get("custom_commands", {}).get(guild_id, {})
+                if cmd_word in custom_cmds:
+                    ctx = await bot.get_context(message)
+                    if is_server_mod_or_owner(ctx):
+                        c_info = custom_cmds[cmd_word]
+                        resp_template = c_info.get("response", "")
+                        args = parts[1] if len(parts) > 1 else ""
+                        target_ch, extra = parse_target_channel_and_text(ctx, args, default_text="")
+                        final_text = resp_template
+                        if extra:
+                            final_text = f"{resp_template} {extra}"
+                        if c_info.get("is_header") and not final_text.startswith("#"):
+                            final_text = f"# {final_text}"
+                        try:
+                            if message.guild and message.channel.permissions_for(message.guild.me).manage_messages:
+                                await message.delete()
+                        except Exception:
+                            pass
+                        await target_ch.send(final_text)
+                        return
+
     await bot.process_commands(message)
 
 @bot.event
@@ -22637,6 +22992,15 @@ async def help_cmd(ctx, category: str = None):
                 ("unlock", "unlock channel"),
                 ("modlog set", "clear — set mod logging channel"),
                 ("whitelist add", "remove — manage admin whitelist"),
+                ("gm", "[#channel] [text] — send large header good morning message"),
+                ("gn", "[#channel] [text] — send large header good night message"),
+                ("header", "[#channel] <text> — send H1 bold header message"),
+                ("say", "[#channel] <text> — send text message to channel"),
+                ("createcmd", "<name> <text> — create custom command for server"),
+                ("deletecmd", "<name> — delete a custom command"),
+                ("customcmds", "list all custom commands for server"),
+                ("grantmod", "@user/@role — grant custom command mod access"),
+                ("revokemod", "@user/@role — revoke custom command mod access"),
             ],
         },
         "admin": {
