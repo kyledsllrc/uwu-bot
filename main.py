@@ -28,6 +28,7 @@ import urllib.request
 import firebase_admin
 from firebase_admin import credentials, db
 from dotenv import load_dotenv
+import wavelink
 
 try:
     import yt_dlp
@@ -233,6 +234,56 @@ BOT_INSTANCE_ID = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
 BOT_LEASE_SECONDS = 45
 BOT_HEARTBEAT_SECONDS = 15
 bot_lease_stop = threading.Event()
+
+# ==============================================
+# 🎵 LAVALINK NODES — AUTO-SWITCH ENABLED
+# Singapore FIRST = LOWEST PING for PH 🇵🇭
+# ==============================================
+LAVALINK_NODES = [
+    # 🏆 TOP — Singapore (BEST FOR PH!)
+    wavelink.Node(
+        uri="https://lavalinkv4.serenetia.com:443",
+        password="https://dsc.gg/ajidevserver",
+        retries=3
+    ),
+    wavelink.Node(
+        uri="https://sg.lavalink.heavencloud.in:443",
+        password="heavencloud",
+        retries=2
+    ),
+    wavelink.Node(
+        uri="http://sg1-nodelink.nyxbot.app:3000",
+        password="nyxbot.app/support",
+        retries=2
+    ),
+    # ✅ GOOD — Backup Nodes
+    wavelink.Node(
+        uri="http://lavalink.darrenofficial.com:80",
+        password="anything",
+        retries=2
+    ),
+    wavelink.Node(
+        uri="https://lavalink.heavencloud.in:443",
+        password="heavencloud",
+        retries=2
+    ),
+    wavelink.Node(
+        uri="https://lavalink.devamop.in:443",
+        password="DevamOP",
+        retries=2
+    ),
+    # ⚠️ FAIR — Last Resort Fallback
+    wavelink.Node(
+        uri="https://lava-v4.ajieblogs.eu.org:443",
+        password="https://dsc.gg/ajidevserver",
+        retries=1
+    ),
+    wavelink.Node(
+        uri="http://lavalink.jirayu.net:13592",
+        password="youshallnotpass",
+        retries=1
+    ),
+]
 
 FFMPEG_OPTIONS = {
     "before_options": (
@@ -3546,106 +3597,143 @@ async def _music_play_next(ctx, guild_id: str):
 
 
 @bot.command(name='play', aliases=['!play', 'music', 'p'])
-async def play_cmd(ctx, *, query: str):
-    """Play a song or playlist from YouTube, Spotify, or Apple Music."""
+async def play_cmd(ctx, *, search: str):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    if yt_dlp is None:
-        return await ctx.send("⚠️ Music playback requires `yt-dlp`. Please install it in requirements.txt.")
+    
+    if not ctx.author.voice:
+        return await ctx.send("❌ Join a voice channel first!")
 
-    # Suppress link embeds on trigger message to prevent Spotify/YouTube 30s preview iframe widget in text chat
+    vc: wavelink.Player = ctx.guild.voice_client
+    if not vc:
+        try:
+            vc = await ctx.author.voice.channel.connect(
+                cls=wavelink.Player,
+                swap_node_on_disconnect=True
+            )
+        except Exception as err:
+            return await ctx.send(f"❌ Could not connect to voice channel: {err}")
+    elif vc.channel != ctx.author.voice.channel:
+        try:
+            await vc.move_to(ctx.author.voice.channel)
+        except Exception:
+            pass
+
     try:
-        await ctx.message.edit(suppress=True)
-    except Exception:
-        pass
-
-    voice = await get_voice_connection(ctx)
-    if voice is None:
-        return
-
-    state = get_music_state(ctx.guild.id)
-    lock = get_music_lock(ctx.guild.id)
-
-    try:
-        result = await create_music_source(query)
-    except Exception as exc:
-        return await ctx.send(f"❌ Could not fetch music: {exc}")
-
-    entries = result if isinstance(result, list) else [result]
-    first = entries[0]
-    queue_count = len(entries)
-
-    v_channel_name = voice.channel.name if voice.channel else "Voice Channel"
-
-    should_play = False
-    async with lock:
-        state["queue"].extend(entries)
-        if not voice.is_playing() and not voice.is_paused() and state["current"] is None:
-            should_play = True
-
-    if should_play:
-        await play_next_track(str(ctx.guild.id))
-        cur = state.get("current") or first
-        first_title = cur.get("title", "Unknown Track")
-        uploader = cur.get("uploader", "Unknown")
-        if queue_count == 1:
-            await ctx.send(f"🎶 **Now Auto-Playing in {v_channel_name}:** **{first_title}**\n🔊 *Full high-quality track streaming directly in your Voice Channel!*")
+        if hasattr(wavelink.Playable, 'search'):
+            tracks = await wavelink.Playable.search(search)
         else:
-            await ctx.send(f"🎶 **Now Auto-Playing in {v_channel_name}:** **{first_title}**\n✅ Added playlist with **{queue_count}** full songs to queue.")
+            tracks = await vc.fetch_tracks(search)
+    except Exception as err:
+        return await ctx.send(f"❌ Error searching for track: {err}")
+
+    if not tracks:
+        return await ctx.send("❌ Song not found!")
+
+    if isinstance(tracks, wavelink.Playlist):
+        playlist_tracks = tracks.tracks
+        if not playlist_tracks:
+            return await ctx.send("❌ Playlist is empty!")
+        first_track = playlist_tracks[0]
+        if not vc.playing:
+            res = vc.play(first_track)
+            if asyncio.iscoroutine(res):
+                await res
+            for track in playlist_tracks[1:]:
+                if hasattr(vc.queue, 'put_wait'):
+                    await vc.queue.put_wait(track)
+                else:
+                    vc.queue.put(track)
+            await ctx.send(f"🎶 Playing: **{getattr(first_track, 'title', 'Track')}** and queued **{len(playlist_tracks) - 1}** songs from playlist!")
+        else:
+            for track in playlist_tracks:
+                if hasattr(vc.queue, 'put_wait'):
+                    await vc.queue.put_wait(track)
+                else:
+                    vc.queue.put(track)
+            await ctx.send(f"✅ Added playlist with **{len(playlist_tracks)}** songs to the queue.")
     else:
-        if queue_count == 1:
-            await ctx.send(f"✅ Added to queue: **{first.get('title', 'Unknown')}**")
+        first_track = tracks[0] if isinstance(tracks, (list, tuple, wavelink.Search)) else tracks
+        if not vc.playing:
+            res = vc.play(first_track)
+            if asyncio.iscoroutine(res):
+                await res
+            await ctx.send(f"🎶 Now playing: **{getattr(first_track, 'title', 'Unknown Track')}**")
         else:
-            await ctx.send(f"✅ Added playlist with **{queue_count}** songs to the queue.")
+            if hasattr(vc.queue, 'put_wait'):
+                await vc.queue.put_wait(first_track)
+            else:
+                vc.queue.put(first_track)
+            await ctx.send(f"✅ Added to queue: **{getattr(first_track, 'title', 'Unknown Track')}**")
 
 
 @bot.command(name='pause')
 async def pause_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    voice = ctx.guild.voice_client if ctx.guild else None
-    if not voice or not voice.is_playing():
-        return await ctx.send("Nothing is playing right now.")
-    voice.pause()
-    await ctx.send("⏸️ Paused the current song.")
+    vc = ctx.guild.voice_client
+    if vc and getattr(vc, 'playing', False):
+        if hasattr(vc, 'pause'):
+            res = vc.pause()
+            if asyncio.iscoroutine(res):
+                await res
+        await ctx.send("⏸️ Paused.")
+    else:
+        await ctx.send("Nothing is playing right now.")
 
 
 @bot.command(name='resume')
 async def resume_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    voice = ctx.guild.voice_client if ctx.guild else None
-    if not voice or not voice.is_paused():
-        return await ctx.send("There is no paused music to resume.")
-    voice.resume()
-    await ctx.send("▶️ Resumed playback.")
+    vc = ctx.guild.voice_client
+    if vc and getattr(vc, 'paused', False):
+        if hasattr(vc, 'resume'):
+            res = vc.resume()
+            if asyncio.iscoroutine(res):
+                await res
+        elif hasattr(vc, 'pause'):
+            res = vc.pause(False)
+            if asyncio.iscoroutine(res):
+                await res
+        await ctx.send("▶️ Resumed.")
+    else:
+        await ctx.send("Playback is not paused.")
 
 
 @bot.command(name='skip')
 async def skip_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    voice = ctx.guild.voice_client if ctx.guild else None
-    if not voice or not voice.is_playing():
-        return await ctx.send("No song is currently playing.")
-    voice.stop()
-    await ctx.send("⏭️ Skipped to the next song.")
+    vc = ctx.guild.voice_client
+    if vc:
+        if hasattr(vc, 'skip'):
+            res = vc.skip()
+            if asyncio.iscoroutine(res):
+                await res
+        else:
+            res = vc.stop()
+            if asyncio.iscoroutine(res):
+                await res
+        await ctx.send("⏭️ Skipped!")
+    else:
+        await ctx.send("Not connected to a voice channel.")
 
 
 @bot.command(name='stop')
 async def stop_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    voice = ctx.guild.voice_client if ctx.guild else None
-    if not voice or not (voice.is_playing() or voice.is_paused()):
-        return await ctx.send("No music is currently playing.")
-    state = get_music_state(ctx.guild.id)
-    lock = get_music_lock(ctx.guild.id)
-    async with lock:
-        state["queue"].clear()
-        state["current"] = None
-        voice.stop()
-    await ctx.send("⏹️ Stopped playback and cleared the queue.")
+    vc = ctx.guild.voice_client
+    if vc:
+        if hasattr(vc, 'queue') and hasattr(vc.queue, 'clear'):
+            vc.queue.clear()
+        res = vc.stop()
+        if asyncio.iscoroutine(res):
+            await res
+        await ctx.send("⏹️ Stopped & cleared queue.")
+    else:
+        await ctx.send("Not connected to a voice channel.")
 
 
 @bot.command(name='leave')
@@ -3653,65 +3741,50 @@ async def leave_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
     if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
-        return await ctx.send("❌ Only the server owner or bot owner can disconnect me.")
-    voice = ctx.guild.voice_client if ctx.guild else None
-    if not voice or not voice.is_connected():
-        return await ctx.send("I'm not connected to a voice channel.")
-    state = get_music_state(ctx.guild.id)
-    lock = get_music_lock(ctx.guild.id)
-    async with lock:
-        state["queue"].clear()
-        state["current"] = None
-        voice.stop()
-        await voice.disconnect()
-    await ctx.send("👋 Left voice and cleared the music queue.")
+        return await ctx.send("❌ Only owner can disconnect me.")
+    vc = ctx.guild.voice_client
+    if vc:
+        await vc.disconnect()
+        await ctx.send("👋 Left voice channel.")
+    else:
+        await ctx.send("I'm not connected to a voice channel.")
 
 
 @bot.command(name='queue')
 async def queue_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    state = get_music_state(ctx.guild.id)
-    current = state.get("current")
-    queue = state.get("queue", [])
-    if not current and not queue:
-        return await ctx.send("📝 The queue is currently empty.")
-    lines = []
-    if current:
-        title = current.get("title", "Unknown")
-        uploader = current.get("uploader", "Unknown")
-        duration = current.get("duration", 0)
-        minutes, seconds = divmod(duration, 60)
-        duration_label = f"{minutes}:{seconds:02d}" if duration else "Unknown"
-        lines.append(f"▶️ Now playing: **{title}** ({uploader}) [{duration_label}]")
-    if queue:
-        lines.append("\n⏭️ Up next:")
-        for index, entry in enumerate(queue[:10], start=1):
-            title = entry.get("title", "Unknown")
-            uploader = entry.get("uploader", "Unknown")
-            lines.append(f"{index}. {title} — {uploader}")
-        if len(queue) > 10:
-            lines.append(f"...and {len(queue) - 10} more tracks.")
-    await ctx.send("\n".join(lines))
+    vc = ctx.guild.voice_client
+    if not vc or not hasattr(vc, 'queue'):
+        return await ctx.send("📝 Queue is empty.")
+    curr = getattr(vc, 'current', None)
+    current = f"▶️ Now playing: **{curr.title}**" if curr and hasattr(curr, 'title') else ""
+    qlist = list(vc.queue)[:10]
+    qtext = "\n".join([f"{i+1}. **{getattr(t, 'title', 'Track')}**" for i, t in enumerate(qlist)]) if qlist else ""
+    msg = f"{current}\n\n⏭️ Up next:\n{qtext}" if qtext else current
+    await ctx.send(msg or "📝 Queue is empty.")
 
 
 @bot.command(name='volume')
 async def volume_cmd(ctx, level: int = None):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    if level is None:
-        return await ctx.send("Use `uwu volume [1-100]` to set playback volume.")
-    if level < 1 or level > 100:
-        return await ctx.send("Volume must be between 1 and 100.")
-    state = get_music_state(ctx.guild.id)
-    state["volume"] = level / 100.0
-    voice = ctx.guild.voice_client if ctx.guild else None
-    if voice and voice.source:
-        try:
-            voice.source.volume = state["volume"]
-        except Exception:
-            pass
-    await ctx.send(f"🔊 Volume set to **{level}%**.")
+    if level is None or not (1 <= level <= 100):
+        return await ctx.send("Use `uwu volume 1-100`")
+    vc = ctx.guild.voice_client
+    if vc:
+        if hasattr(vc, 'set_volume'):
+            await vc.set_volume(level)
+        else:
+            vc.volume = level / 100
+        await ctx.send(f"🔊 Volume set to **{level}%**")
+    else:
+        await ctx.send("I'm not connected to a voice channel.")
+
+
+@bot.event
+async def on_wavelink_node_disconnected(node):
+    print(f"⚠️ Node disconnected: {getattr(node, 'uri', 'Node')} → Auto-switching to next...")
 
 
 @bot.command(name='lyrics')
@@ -3720,9 +3793,9 @@ async def lyrics_cmd(ctx, *, song_name: str = None):
         return await ctx.send("**Music commands are currently disabled.**")
     title = song_name
     if not title:
-        state = get_music_state(ctx.guild.id) if ctx.guild else None
-        if state and state.get("current"):
-            title = state["current"].get("title")
+        vc = ctx.guild.voice_client
+        if vc and getattr(vc, 'current', None):
+            title = getattr(vc.current, 'title', None)
     if not title:
         return await ctx.send("Use `uwu lyrics [song name]` or play a song first.")
     result = await fetch_lyrics(title)
@@ -3754,30 +3827,33 @@ async def save_cmd(ctx, *, playlist_name: str = None):
         for playlist in saved:
             lines.append(f"- {playlist['name']} ({len(playlist.get('songs', []))} songs)")
         return await ctx.send("\n".join(lines))
-    state = get_music_state(ctx.guild.id) if ctx.guild else None
-    if not state or (not state.get("current") and not state.get("queue")):
-        return await ctx.send("No playlist is currently active to save.")
+    
+    vc = ctx.guild.voice_client
+    curr = getattr(vc, 'current', None) if vc else None
+    q = getattr(vc, 'queue', []) if vc else []
+    if not vc or (not curr and not len(q)):
+        return await ctx.send("No active music or queue to save.")
     playlist = {
         "name": playlist_name.strip(),
         "created_at": int(time.time()),
         "songs": [],
     }
-    if state.get("current"):
+    if curr:
         playlist["songs"].append({
-            "title": state["current"]["title"],
-            "url": state["current"]["webpage_url"],
+            "title": getattr(curr, 'title', 'Track'),
+            "url": getattr(curr, 'uri', getattr(curr, 'title', 'Track')),
         })
-    for item in state.get("queue", []):
+    for item in q:
         playlist["songs"].append({
-            "title": item["title"],
-            "url": item["webpage_url"],
+            "title": getattr(item, 'title', 'Track'),
+            "url": getattr(item, 'uri', getattr(item, 'title', 'Track')),
         })
     saved = user.setdefault("saved_playlists", [])
     saved = [p for p in saved if p["name"].lower() != playlist["name"].lower()]
     saved.append(playlist)
     user["saved_playlists"] = saved
-    save_data(DATA)
-    await ctx.send(f"💾 Saved current playlist as **{playlist['name']}**.")
+    save_users()
+    await ctx.send(f"💾 Saved current playlist as **{playlist['name']}** with **{len(playlist['songs'])}** songs.")
 
 
 # --- FLOWER SHOP & MARRIAGE SYSTEM ---
@@ -17703,12 +17779,18 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_ready():
-    print(f"\n✅ BOT ONLINE — LOGGED IN AS: {bot.user}")
+    # ✅ === ADD THESE 2 NEW LINES FIRST ===
+    await wavelink.Pool.connect(nodes=LAVALINK_NODES, client=bot)
+    print(f"✅ Lavalink: {len(LAVALINK_NODES)} nodes loaded — Auto-Switch: ON! 🎶")
+    # ======================================
+
+    # ✅ YOUR EXISTING CODE — KEEP ALL OF THIS BELOW!
+    print(f"✅ BOT ONLINE — LOGGED IN AS: {bot.user}")
     print(f"✅ CURRENT PREFIX: '{CURRENT_PREFIX}'")
-    print("✅ OWNER MODE ACTIVE\n")
+    print(f"✅ OWNER MODE ACTIVE\n")
     if not crypto_market_loop.is_running():
         crypto_market_loop.start()
-        print("✅ UWUCRYPTO MARKET LOOP ACTIVE")
+        print("✅ UNCRYPTO MARKET LOOP ACTIVE")
     for guild in bot.guilds:
         try:
             await fetch_and_cache_guild_invites(guild)

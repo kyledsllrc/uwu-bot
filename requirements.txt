@@ -11,3 +11,4 @@ spotipy
 beautifulsoup4
 PyNaCl
 davey
+wavelink
