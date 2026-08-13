@@ -4006,8 +4006,7 @@ async def play_cmd(ctx, *, search: str):
     if not vc:
         try:
             vc = await ctx.author.voice.channel.connect(
-                cls=wavelink.Player,
-                swap_node_on_disconnect=True
+                cls=wavelink.Player
             )
         except Exception as err:
             return await ctx.send(f"❌ Could not connect to voice channel: {err}")
@@ -12541,6 +12540,7 @@ def normalize_user(user):
     user.setdefault("quest_date", "")
     user["crypto_private"] = bool(user.get("crypto_private", False))
     user["marriage_private"] = bool(user.get("marriage_private", False))
+    user["bank_private"] = bool(user.get("bank_private", False))
     user.setdefault("marriage_partner_id", "")
     user.setdefault("marriage_date", 0)
     user.setdefault("marriage_level", 0)
@@ -18451,8 +18451,11 @@ async def money(ctx):
     user = get_user(ctx.author.id)
     
     lines = [
-        f"🍁 **{ctx.author.display_name}**, you currently have **{format_coins(user['wallet'])} uwuncy** in wallet (`{format_coins(user['bank'])}` in bank)!"
+        f"🍁 **{ctx.author.display_name}**, you currently have **{format_coins(user['wallet'])} uwuncy** in wallet!"
     ]
+
+    if not user.get("bank_private") and user.get("bank", 0) > 0:
+        lines.append(f"🏦 **Bank:** `{format_coins(user['bank'])}` uwuncy")
 
     if not user.get("crypto_private"):
         _crypto_rows, _crypto_invested, crypto_value, _crypto_profit = crypto_portfolio(user)
@@ -18495,6 +18498,16 @@ async def set_marriage_privacy(ctx, private: bool):
         await ctx.send("🔓 **Marriage status visible!** `uwu bal` will show marriage details.")
 
 
+async def set_bank_privacy(ctx, private: bool):
+    user = get_user(ctx.author.id)
+    user["bank_private"] = private
+    save_data(DATA)
+    if private:
+        await ctx.send("🔒 **Bank details hidden!** `uwu bal` will no longer display your bank balance.")
+    else:
+        await ctx.send("🔓 **Bank details visible!** `uwu bal` will show your bank balance.")
+
+
 @bot.command(name="hidecrypto", aliases=["crypto privacy off", "privatecrypto"])
 async def hidecrypto_cmd(ctx):
     """Hide crypto holdings in uwu bal."""
@@ -18517,6 +18530,18 @@ async def hidemarry_cmd(ctx):
 async def showmarry_cmd(ctx):
     """Show marriage status in uwu bal."""
     await set_marriage_privacy(ctx, False)
+
+
+@bot.command(name="hidebank", aliases=["hidebankbal", "privatebank"])
+async def hidebank_cmd(ctx):
+    """Hide bank balance in uwu bal."""
+    await set_bank_privacy(ctx, True)
+
+
+@bot.command(name="showbank", aliases=["showbankbal", "publicbank"])
+async def showbank_cmd(ctx):
+    """Show bank balance in uwu bal."""
+    await set_bank_privacy(ctx, False)
 
 
 @bot.command(name="history", aliases=["bets", "recent"])
@@ -22910,6 +22935,141 @@ async def enable_category_cmd(ctx, category: str):
     )
     await ctx.send(embed=embed)
 
+def build_help_main_embed(p, user, guild_name, is_booster, available_categories, help_categories):
+    embed = discord.Embed(
+        title="🤖 UwU Bot Directory & Help Center",
+        description=(
+            f"Welcome to **UwU Bot**, {user.mention}!\n"
+            f"Prefix: `{p}` or `{p} <command>`\n\n"
+            f"✨ **How to use:** Select a category from the dropdown menu below to view specific commands, "
+            f"or type `{p}help <category>` (e.g. `{p}help economy`)."
+        ),
+        color=discord.Color.from_rgb(255, 182, 193)
+    )
+
+    for key in available_categories:
+        cat_obj = help_categories[key]
+        title = cat_obj["title"]
+        items = cat_obj["items"]
+        sample_cmds = ", ".join(f"`{p}{cmd}`" for cmd, _ in items[:4])
+        if len(items) > 4:
+            sample_cmds += f", +{len(items) - 4} more"
+        embed.add_field(
+            name=f"{title}",
+            value=sample_cmds,
+            inline=False
+        )
+
+    if is_booster:
+        embed.add_field(
+            name="⚡ Server Booster Status: ACTIVE",
+            value=f"Thank you for boosting **{guild_name}**! You enjoy 0s command cooldowns & VIP perks (`{p}booster`).",
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="💎 Boost Perks",
+            value=f"Boost **{guild_name}** to unlock **5T daily uwuncy**, **0s command cooldowns**, and VIP features! (`{p}boosters`)",
+            inline=False
+        )
+
+    embed.set_footer(text="Select a category from the dropdown menu below • UwU Bot")
+    return embed
+
+
+def build_category_embed(cat_key, cat_obj, p, guild_name, is_booster):
+    embed = discord.Embed(
+        title=f"{cat_obj['title']}",
+        description=cat_obj.get("desc", f"Commands in the **{cat_key.capitalize()}** category. Usage: `{p}<command>`"),
+        color=discord.Color.from_rgb(255, 182, 193)
+    )
+
+    items = cat_obj["items"]
+    chunk_size = 12
+    for i in range(0, len(items), chunk_size):
+        sub_items = items[i:i + chunk_size]
+        field_lines = []
+        for cmd, alias in sub_items:
+            if alias:
+                field_lines.append(f"• `{p}{cmd}` — {alias}")
+            else:
+                field_lines.append(f"• `{p}{cmd}`")
+        
+        field_title = f"Commands ({i+1} - {min(i+chunk_size, len(items))})" if len(items) > chunk_size else "Available Commands"
+        embed.add_field(
+            name=field_title,
+            value="\n".join(field_lines),
+            inline=False
+        )
+
+    if is_booster:
+        embed.set_footer(text="⚡ Server Booster Active (0s cooldowns) | Select category below")
+    else:
+        embed.set_footer(text=f"Use {p}help <category> | Select category below")
+
+    return embed
+
+
+class HelpSelect(discord.ui.Select):
+    def __init__(self, help_categories, available_categories, author_id, is_booster, is_owner_user, p, guild_name):
+        category_emojis = {
+            "booster": "💎",
+            "economy": "💰",
+            "gambling": "🎰",
+            "social": "💬",
+            "music": "🎵",
+            "moderation": "🛡️",
+            "admin": "👑",
+        }
+        options = [
+            discord.SelectOption(
+                label="Main Menu",
+                value="main",
+                description="Return to the Help Overview",
+                emoji="🏠"
+            )
+        ]
+        for cat_id in available_categories:
+            cat = help_categories[cat_id]
+            clean_title = cat["title"]
+            for prefix in ["💎 ", "💰 ", "🎰 ", "💬 ", "🎵 ", "🛡️ ", "👑 "]:
+                clean_title = clean_title.replace(prefix, "")
+            options.append(discord.SelectOption(
+                label=clean_title,
+                value=cat_id,
+                description=f"Browse {len(cat['items'])} {cat_id} commands",
+                emoji=category_emojis.get(cat_id, "📌")
+            ))
+
+        super().__init__(placeholder="Select a category to view commands...", min_values=1, max_values=1, options=options)
+        self.help_categories = help_categories
+        self.available_categories = available_categories
+        self.author_id = author_id
+        self.is_booster = is_booster
+        self.is_owner_user = is_owner_user
+        self.p = p
+        self.guild_name = guild_name
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ This help menu belongs to someone else. Type `uwu help` to open your own!", ephemeral=True)
+
+        selected = self.values[0]
+        if selected == "main":
+            embed = build_help_main_embed(self.p, interaction.user, self.guild_name, self.is_booster, self.available_categories, self.help_categories)
+        else:
+            cat_obj = self.help_categories[selected]
+            embed = build_category_embed(selected, cat_obj, self.p, self.guild_name, self.is_booster)
+
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, help_categories, available_categories, author_id, is_booster, is_owner_user, p, guild_name):
+        super().__init__(timeout=180)
+        self.add_item(HelpSelect(help_categories, available_categories, author_id, is_booster, is_owner_user, p, guild_name))
+
+
 @bot.command(name="help")
 async def help_cmd(ctx, category: str = None):
     p = get_prefix()
@@ -22941,6 +23101,8 @@ async def help_cmd(ctx, category: str = None):
                 ("claim", "claim hourly uwuncy reward"),
                 ("daily", "claim daily uwuncy streak"),
                 ("money", "bal / balance — check wallet & bank"),
+                ("hidebank", "hide bank details in uwu bal"),
+                ("showbank", "show bank details in uwu bal"),
                 ("info", "userinfo — check user profile & stats"),
                 ("deposit", "dep <amount|all> — deposit into bank"),
                 ("withdraw", "with <amount|all> — withdraw from bank"),
@@ -22995,6 +23157,10 @@ async def help_cmd(ctx, category: str = None):
                 ("divorce", "end marriage status"),
                 ("hidemarry", "hide marriage status in uwu bal"),
                 ("showmarry", "show marriage status in uwu bal"),
+                ("hidecrypto", "hide crypto holdings in uwu bal"),
+                ("showcrypto", "show crypto holdings in uwu bal"),
+                ("hidebank", "hide bank balance in uwu bal"),
+                ("showbank", "show bank balance in uwu bal"),
                 ("ship", "@user @user — check love compatibility"),
             ],
         },
@@ -23071,32 +23237,7 @@ async def help_cmd(ctx, category: str = None):
         },
     }
 
-    def format_command(name, alias_text):
-        if alias_text:
-            return f"- `{p}{name}` ({alias_text})"
-        return f"- `{p}{name}`"
-
-    def format_category(name, category_dict):
-        lines = [f"__{category_dict['title']}__"]
-        lines.extend(format_command(cmd, alias) for cmd, alias in category_dict['items'])
-        return lines
-
-    def split_chunks(lines):
-        chunks = []
-        current = ""
-        for line in lines:
-            if len(current) + len(line) + 1 > 1900:
-                chunks.append(current)
-                current = line
-            else:
-                current = f"{current}\n{line}" if current else line
-        if current:
-            chunks.append(current)
-        return chunks
-
-    requested = category.strip().lower() if category else None
     available_categories = []
-    
     order = ["booster", "economy", "gambling", "social", "music", "moderation", "admin"]
     for key in order:
         if key in HELP_CATEGORIES:
@@ -23109,56 +23250,12 @@ async def help_cmd(ctx, category: str = None):
             else:
                 available_categories.append(key)
 
+    requested = category.strip().lower() if category else None
+
     if not requested:
-        if is_booster:
-            srv_boosts = getattr(ctx.guild, "premium_subscription_count", 0) if ctx.guild else 0
-            active_boosters = len(booster_utils.get_guild_boosters(ctx.guild)) if ctx.guild else 0
-            usr_boosts = booster_utils.get_user_boost_count(ctx.author, user=get_user(ctx.author.id), guild=ctx.guild)
-            total_server_boosts = max(srv_boosts, active_boosters)
-            lines = [
-                f"💎 ════════════════════════════════════════ 💎",
-                f"⚡ **VIP SERVER BOOSTER HELP MENU** ⚡",
-                f"Thank you {ctx.author.mention} for boosting **{guild_name}**!",
-                f"💎 ════════════════════════════════════════ 💎",
-                f"",
-                f"✨ **YOUR ACTIVE BOOSTER ADVANTAGES & PERKS:**",
-                f"• 🎁 **Daily Reward:** `+5,000,000,000,000 (5T) uwuncy` (`{p}booster`)",
-                f"• ⚡ **Command Cooldowns:** `BYPASSED (0s cooldowns on all commands)`",
-                f"• 🖼️ **Links & Media:** `BYPASSED` in restricted channels",
-                f"• 🛒 **Booster Shop Catalog:** `UNLOCKED` (`{p}booster shop`)",
-                f"• 💎 **Server Total Boosts:** `{total_server_boosts} Boost(s)`",
-                f"• 👥 **Active Server Boosters:** `{active_boosters} Member(s)`",
-                f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)` ({usr_boosts}× multiplier)",
-                f"",
-                f"Use `{p}help <category>` to view a specific section.",
-                f""
-            ]
-        else:
-            lines = [
-                f"🤖 **UwU Bot Help Menu** for {ctx.author.display_name}",
-                f"Prefix: `{p}`",
-                f"",
-                f"💎 **BOOST OUR SERVER FOR EXCLUSIVE PERKS!**",
-                f"Boost **{guild_name}** to unlock **5T daily uwuncy**, **0s command cooldowns**, and the **VIP Booster Help Menu**! (`{p}boosters` / `{p}booster`)",
-                f"",
-                f"Use `{p}help <category>` to view a specific section.",
-                f""
-            ]
-
-        for key in available_categories:
-            cat_obj = HELP_CATEGORIES[key]
-            if is_booster and key == "booster":
-                lines.append("⚡ **SERVER BOOSTER EXCLUSIVE COMMANDS**")
-                for cmd, alias in cat_obj['items']:
-                    lines.append(f"• `{p}{cmd}` — {alias}")
-                lines.append("")
-            else:
-                lines.extend(format_category(key, cat_obj))
-                lines.append("")
-
-        for chunk in split_chunks(lines):
-            await ctx.send(chunk)
-        return
+        embed = build_help_main_embed(p, ctx.author, guild_name, is_booster, available_categories, HELP_CATEGORIES)
+        view = HelpView(HELP_CATEGORIES, available_categories, ctx.author.id, is_booster, is_owner(ctx), p, guild_name)
+        return await ctx.send(embed=embed, view=view)
 
     matched_key = None
     for key, cat_obj in HELP_CATEGORIES.items():
@@ -23180,33 +23277,9 @@ async def help_cmd(ctx, category: str = None):
         )
 
     cat_obj = HELP_CATEGORIES[matched_key]
-    if is_booster and matched_key == "booster":
-        usr_boosts = booster_utils.get_user_boost_count(ctx.author, user=get_user(ctx.author.id), guild=ctx.guild)
-        lines = [
-            f"💎 **VIP SERVER BOOSTER COMMANDS & BENEFITS** 💎",
-            f"Special perks unlocked for boosting **{guild_name}**:",
-            f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)` ({usr_boosts}× daily reward multiplier)",
-            f"",
-            f"• `{p}booster` (or `{p}booster claim`) — Claim your daily **5T uwuncy** + stacking boost multipliers.",
-            f"• `{p}boosters` (or `{p}boosterlist`) — View all server boosters & current server boost level.",
-            f"• `{p}booster count <amount>` — Set/update active boost count (or `{p}setboostcount <@user> <amount>`).",
-            f"• `{p}booster shop` — Browse the booster shop catalog (Cooldown Skips, Auto-Claim Passes, 2x Earnings).",
-            f"• `{p}booster buy <item_id>` — Buy exclusive booster items with uwuncy.",
-            f"",
-            f"⚡ **Booster Passive Perks:**",
-            f"• **0 Command Cooldowns**: Bypasses all standard command cooldown limits.",
-            f"• **Auto-Claim Pass**: Automatically collects your 5T daily reward when chatting.",
-            f"• **Filter Bypass**: Bypasses link and image filters in restricted channels."
-        ]
-    else:
-        lines = [f"UwU Help — {cat_obj['title']}", ""]
-        if is_booster:
-            lines.append("⚡ *As a Server Booster, all command cooldowns are 0 seconds for you!*")
-            lines.append("")
-        lines.extend(format_category(matched_key, cat_obj))
-
-    for chunk in split_chunks(lines):
-        await ctx.send(chunk)
+    embed = build_category_embed(matched_key, cat_obj, p, guild_name, is_booster)
+    view = HelpView(HELP_CATEGORIES, available_categories, ctx.author.id, is_booster, is_owner(ctx), p, guild_name)
+    await ctx.send(embed=embed, view=view)
 
 
 # ==============================================
