@@ -4158,18 +4158,44 @@ async def stop_cmd(ctx):
         await ctx.send("Not connected to a voice channel.")
 
 
+MODE_247_GUILDS = set()
+
+
 @bot.command(name='leave')
 async def leave_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
     if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
         return await ctx.send("❌ Only owner can disconnect me.")
+    if ctx.guild.id in MODE_247_GUILDS:
+        MODE_247_GUILDS.remove(ctx.guild.id)
     vc = ctx.guild.voice_client
     if vc:
         await vc.disconnect()
         await ctx.send("👋 Left voice channel.")
     else:
         await ctx.send("I'm not connected to a voice channel.")
+
+
+@bot.command(name='247', aliases=['24/7', '24-7', 'stay'])
+async def mode_247_cmd(ctx):
+    if is_category_disabled(ctx.guild, 'music'):
+        return await ctx.send("**Music commands are currently disabled.**")
+    guild_id = ctx.guild.id
+    if guild_id in MODE_247_GUILDS:
+        MODE_247_GUILDS.remove(guild_id)
+        await ctx.send("🔴 **24/7 Mode Disabled**: The bot will no longer auto-reconnect when idle or disconnected.")
+    else:
+        MODE_247_GUILDS.add(guild_id)
+        vc = ctx.guild.voice_client
+        if not vc and ctx.author.voice and ctx.author.voice.channel:
+            try:
+                vc = await ctx.author.voice.channel.connect(cls=wavelink.Player)
+                if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
+                    vc.autoplay = wavelink.AutoPlay.enabled
+            except Exception as err:
+                print(f"⚠️ Failed to connect on 24/7 enable: {err}")
+        await ctx.send("🟢 **24/7 Mode Active**: The bot will stay in voice call 24/7 and automatically rejoin if Discord drops or resets the voice connection!")
 
 
 @bot.command(name='queue')
@@ -4250,6 +4276,22 @@ async def on_wavelink_track_stuck(payload):
                 await res
     except Exception as exc:
         print(f"⚠️ Error in on_wavelink_track_stuck: {exc}")
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.id == bot.user.id:
+        if before.channel and not after.channel:
+            guild_id = member.guild.id
+            if guild_id in MODE_247_GUILDS:
+                await asyncio.sleep(2)
+                try:
+                    vc = await before.channel.connect(cls=wavelink.Player)
+                    if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
+                        vc.autoplay = wavelink.AutoPlay.enabled
+                    print(f"🔄 Auto-reconnected 24/7 player to {before.channel.name} in {member.guild.name}")
+                except Exception as err:
+                    print(f"⚠️ 24/7 Auto-reconnect failed: {err}")
 
 
 @bot.command(name='lyrics')
@@ -23267,6 +23309,7 @@ async def help_cmd(ctx, category: str = None):
                 ("stop", "stop music & disconnect"),
                 ("queue", "view upcoming song queue"),
                 ("leave", "disconnect bot from voice channel"),
+                ("247", "24/7 / stay — toggle 24/7 voice stay & auto-reconnect"),
                 ("volume", "[1-100] — set music volume"),
                 ("lyrics", "[song name] — search song lyrics"),
                 ("save", "[name] — save track to playlist"),
