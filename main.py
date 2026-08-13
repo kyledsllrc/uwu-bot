@@ -3374,7 +3374,8 @@ async def boosters_cmd(ctx):
         for idx, member in enumerate(boosters, 1):
             boost_since = getattr(member, "premium_since", None)
             since_str = f"since <t:{int(boost_since.timestamp())}:R>" if boost_since else "Active Booster"
-            count = booster_utils.get_user_boost_count(member)
+            u_obj = get_user(member.id)
+            count = booster_utils.get_user_boost_count(member, user=u_obj, guild=guild)
             lines.append(f"`{idx}.` {member.mention} ({member.display_name}) — **{count} Boost{'s' if count > 1 else ''}** ({since_str})")
 
         embed.add_field(
@@ -3396,23 +3397,87 @@ async def boosters_cmd(ctx):
     return await ctx.send(embed=embed)
 
 
-@bot.command(name="setbooster", aliases=[",setbooster", "boosteradd", "boosterremove"])
-async def setbooster_cmd(ctx, target: discord.Member = None, status: str = "on"):
-    """Admin command to grant or revoke server booster status manually."""
-    if not is_owner(ctx) and not (ctx.guild and ctx.author.guild_permissions.administrator):
-        return await ctx.send("❌ Only Administrators or Bot Owners can use this command!")
-    if target is None:
-        target = ctx.author
+@bot.command(name="setbooster", aliases=[",setbooster", "boosteradd", "boosterremove", "setboostcount", "setboosts", "boostcount"])
+async def setbooster_cmd(ctx, target: Union[discord.Member, str] = None, *, status: str = None):
+    """Grant, revoke, or set server booster status and boost count."""
+    member_target = None
+    count = None
+    state = True
 
-    u_data = get_user(target.id)
-    state = status.lower() in ("on", "true", "enable", "add", "yes", "1")
+    if isinstance(target, discord.Member):
+        member_target = target
+        if status:
+            s_str = status.strip().lower()
+            if s_str in ("off", "false", "disable", "remove", "no", "0"):
+                state = False
+                count = 0
+            elif s_str.isdigit():
+                count = int(s_str)
+                state = True if count > 0 else False
+            elif s_str in ("on", "true", "enable", "add", "yes", "1"):
+                state = True
+                count = 1
+    elif isinstance(target, str):
+        target_str = target.strip().lower()
+        if target_str.isdigit():
+            member_target = ctx.author
+            count = int(target_str)
+            state = True if count > 0 else False
+        elif target_str in ("off", "false", "disable", "remove", "no", "0"):
+            member_target = ctx.author
+            state = False
+            count = 0
+        elif target_str in ("on", "true", "enable", "add", "yes", "1"):
+            member_target = ctx.author
+            state = True
+            count = 1
+        else:
+            try:
+                converter = commands.MemberConverter()
+                member_target = await converter.convert(ctx, target)
+                if status:
+                    s2 = status.strip().lower()
+                    if s2.isdigit():
+                        count = int(s2)
+                        state = True if count > 0 else False
+                    elif s2 in ("off", "false", "disable", "remove", "no", "0"):
+                        state = False
+                        count = 0
+            except Exception:
+                member_target = ctx.author
+
+    if member_target is None:
+        member_target = ctx.author
+
+    is_admin_or_owner = is_owner(ctx) or (ctx.guild and ctx.author.guild_permissions.administrator)
+    if member_target != ctx.author and not is_admin_or_owner:
+        return await ctx.send("❌ Only Administrators or Bot Owners can modify another member's booster status!")
+
+    if member_target == ctx.author and not is_admin_or_owner:
+        if not booster_utils.is_server_booster(ctx.author, get_user(ctx.author.id), guild=ctx.guild):
+            return await ctx.send("❌ Only Server Boosters, Administrators, or Bot Owners can use this command!")
+
+    u_data = get_user(member_target.id)
     u_data["is_booster"] = state
+    if count is not None:
+        u_data["boost_count"] = count
+        u_data["boosts"] = count
+    elif state and not u_data.get("boost_count"):
+        u_data["boost_count"] = 1
+        u_data["boosts"] = 1
+
     save_data(DATA)
 
+    eff_count = booster_utils.get_user_boost_count(member_target, user=u_data, guild=ctx.guild)
+
     if state:
-        await ctx.send(f"⚡ Granted **Server Booster** status & VIP perks to {target.mention}! They can now use `{get_prefix()}help` for the VIP Booster Menu!")
+        await ctx.send(
+            f"⚡ Updated **Server Booster** status for {member_target.mention}!\n"
+            f"💎 **Active Boost Count:** `{eff_count} Boost{'s' if eff_count > 1 else ''}` (Daily reward multiplier: **{eff_count}×**)\n"
+            f"✨ Thank you for boosting {ctx.guild.name if ctx.guild else 'the server'}!"
+        )
     else:
-        await ctx.send(f"🚫 Revoked **Server Booster** status from {target.mention}.")
+        await ctx.send(f"🚫 Revoked **Server Booster** status from {member_target.mention}.")
 
 
 @bot.command(name="booster", aliases=[",booster", "boosterclaim", ",boosterclaim", "boostershop", ",boostershop", "uwubooster"])
@@ -3587,8 +3652,23 @@ async def booster_cmd(ctx, action: str = None, *, item_arg: str = None):
         embed.add_field(name="💳 Remaining Wallet", value=f"`{booster_utils.format_trillion(user['wallet'])} uwuncy`", inline=True)
         return await ctx.send(embed=embed)
 
+    elif action.lower() in ("setcount", "count", "boosts", "setboosts"):
+        if not is_booster:
+            return await ctx.send("❌ You must be a **Server Booster** to set your boost count!")
+        if not item_arg or not item_arg.strip().isdigit():
+            return await ctx.send("❌ Please specify a valid boost count! Example: `uwu booster count 2`")
+        cnt = int(item_arg.strip())
+        if cnt < 1 or cnt > 50:
+            return await ctx.send("❌ Boost count must be between 1 and 50.")
+        user["boost_count"] = cnt
+        user["boosts"] = cnt
+        user["is_booster"] = True
+        save_data(DATA)
+        eff = booster_utils.get_user_boost_count(ctx.author, user=user, guild=ctx.guild)
+        return await ctx.send(f"⚡ Set your boost count to **{eff} Boosts**! Your daily reward multiplier is now **{eff}×**.")
+
     else:
-        return await ctx.send("❌ Unknown booster subcommand! Available: `uwu booster`, `uwu booster shop`, `uwu booster buy <item_id>`")
+        return await ctx.send("❌ Unknown booster subcommand! Available: `uwu booster`, `uwu booster shop`, `uwu booster buy <item_id>`, `uwu booster count <amount>`")
 
 
 async def _music_play_next(ctx, guild_id: str):
@@ -22450,6 +22530,8 @@ async def help_cmd(ctx, category: str = None):
             "items": [
                 ("booster", "claim daily 5T uwuncy reward & view booster multipliers"),
                 ("boosters", "view active server boosters & server boost tier level"),
+                ("booster count <amount>", "set or update active boost count"),
+                ("setboostcount <@user> <amount>", "admin/booster sync user boost count"),
                 ("booster shop", "browse exclusive booster items & passes catalog"),
                 ("booster buy <item_id>", "purchase booster items with uwuncy"),
             ],
@@ -22623,7 +22705,7 @@ async def help_cmd(ctx, category: str = None):
         if is_booster:
             srv_boosts = getattr(ctx.guild, "premium_subscription_count", 0) if ctx.guild else 0
             active_boosters = len(booster_utils.get_guild_boosters(ctx.guild)) if ctx.guild else 0
-            usr_boosts = booster_utils.get_user_boost_count(ctx.author)
+            usr_boosts = booster_utils.get_user_boost_count(ctx.author, user=get_user(ctx.author.id), guild=ctx.guild)
             total_server_boosts = max(srv_boosts, active_boosters)
             lines = [
                 f"💎 ════════════════════════════════════════ 💎",
@@ -22638,7 +22720,7 @@ async def help_cmd(ctx, category: str = None):
                 f"• 🛒 **Booster Shop Catalog:** `UNLOCKED` (`{p}booster shop`)",
                 f"• 💎 **Server Total Boosts:** `{total_server_boosts} Boost(s)`",
                 f"• 👥 **Active Server Boosters:** `{active_boosters} Member(s)`",
-                f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)`",
+                f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)` ({usr_boosts}× multiplier)",
                 f"",
                 f"Use `{p}help <category>` to view a specific section.",
                 f""
@@ -22691,12 +22773,15 @@ async def help_cmd(ctx, category: str = None):
 
     cat_obj = HELP_CATEGORIES[matched_key]
     if is_booster and matched_key == "booster":
+        usr_boosts = booster_utils.get_user_boost_count(ctx.author, user=get_user(ctx.author.id), guild=ctx.guild)
         lines = [
             f"💎 **VIP SERVER BOOSTER COMMANDS & BENEFITS** 💎",
             f"Special perks unlocked for boosting **{guild_name}**:",
+            f"• 👤 **Your Active Boosts:** `{usr_boosts} Boost(s)` ({usr_boosts}× daily reward multiplier)",
             f"",
             f"• `{p}booster` (or `{p}booster claim`) — Claim your daily **5T uwuncy** + stacking boost multipliers.",
             f"• `{p}boosters` (or `{p}boosterlist`) — View all server boosters & current server boost level.",
+            f"• `{p}booster count <amount>` — Set/update active boost count (or `{p}setboostcount <@user> <amount>`).",
             f"• `{p}booster shop` — Browse the booster shop catalog (Cooldown Skips, Auto-Claim Passes, 2x Earnings).",
             f"• `{p}booster buy <item_id>` — Buy exclusive booster items with uwuncy.",
             f"",

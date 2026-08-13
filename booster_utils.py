@@ -1,5 +1,6 @@
 import time
 import discord
+import re
 
 # --- BOOSTER SHOP ITEMS CATALOG ---
 BOOSTER_SHOP_ITEMS = {
@@ -222,7 +223,7 @@ def get_guild_boosters(guild):
     boosters = []
     # Primary check across guild members
     for member in guild.members:
-        if is_server_booster(member):
+        if is_server_booster(member, guild=guild):
             boosters.append(member)
 
     # Fallback to guild.premium_subscribers
@@ -234,15 +235,52 @@ def get_guild_boosters(guild):
     return boosters
 
 
-def get_user_boost_count(member, user=None):
+def get_user_boost_count(member, user=None, guild=None):
     """Calculate effective boost count for member."""
     count = 1
-    if isinstance(member, discord.Member):
-        boost_roles = [r for r in member.roles if "booster" in r.name.lower() or getattr(r, "is_premium_subscriber", lambda: False)()]
-        if len(boost_roles) > 1:
-            count = len(boost_roles)
 
-    if user is not None:
+    # 1. Check user profile / database setting
+    if user is not None and isinstance(user, dict):
+        if user.get("boost_count") and isinstance(user.get("boost_count"), (int, float)):
+            count = max(count, int(user.get("boost_count")))
+        elif user.get("boosts") and isinstance(user.get("boosts"), (int, float)):
+            count = max(count, int(user.get("boosts")))
+
+    target_guild = guild or getattr(member, "guild", None)
+    member_id = getattr(member, "id", None)
+
+    # 2. Check guild.premium_subscribers list for multiple occurrences of this member
+    if target_guild is not None and member_id is not None:
+        try:
+            premium_subs = getattr(target_guild, "premium_subscribers", []) or []
+            matches = sum(1 for sub in premium_subs if getattr(sub, "id", None) == member_id)
+            if matches > 1:
+                count = max(count, matches)
+        except Exception:
+            pass
+
+    # 3. Check member roles for custom boost count badges/numbers (e.g. "2x Booster", "3 Boosts", "Double Booster", etc.)
+    if isinstance(member, discord.Member):
+        roles = getattr(member, "roles", []) or []
+        for r in roles:
+            r_name = getattr(r, "name", "").lower()
+            match = re.search(r'(\d+)\s*(?:x|\*|boosts?|server boosts?)', r_name) or re.search(r'(?:boosts?|booster)\s*(?:x|\*|\:)?\s*(\d+)', r_name)
+            if match:
+                try:
+                    num = int(match.group(1))
+                    if 1 <= num <= 50:
+                        count = max(count, num)
+                except ValueError:
+                    pass
+            if any(term in r_name for term in ("double boost", "2x boost", "2x booster", "2 boost")):
+                count = max(count, 2)
+            elif any(term in r_name for term in ("triple boost", "3x boost", "3x booster", "3 boost")):
+                count = max(count, 3)
+            elif any(term in r_name for term in ("quadruple boost", "4x boost", "4x booster", "4 boost")):
+                count = max(count, 4)
+
+    # 4. Check inventory multiplier (e.g. booster shop item)
+    if user is not None and isinstance(user, dict):
         inventory = user.get("inventory", [])
         if "boost_count_multiplier" in inventory:
             count *= 2
