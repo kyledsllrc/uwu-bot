@@ -3815,7 +3815,7 @@ async def say_cmd(ctx, *, args: str = None):
     await target_ch.send(text)
 
 
-@bot.command(name="createcmd", aliases=["create", "addcmd", "customcmd", "createcommand", "newcmd"])
+@bot.command(name="createcmd", aliases=["addcmd", "customcmd", "createcommand", "newcmd"])
 async def createcmd_cmd(ctx, name_or_mode: str = None, *, response: str = None):
     """Create a new custom command for your server.
     Usage:
