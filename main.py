@@ -12540,6 +12540,7 @@ def normalize_user(user):
         user["quests"] = []
     user.setdefault("quest_date", "")
     user["crypto_private"] = bool(user.get("crypto_private", False))
+    user["marriage_private"] = bool(user.get("marriage_private", False))
     user.setdefault("marriage_partner_id", "")
     user.setdefault("marriage_date", 0)
     user.setdefault("marriage_level", 0)
@@ -18435,14 +18436,18 @@ async def claim_amount_cmd(ctx, amount_text: str = None):
 @bot.command(name="money", aliases=["bal", "balance"])
 async def money(ctx):
     user = get_user(ctx.author.id)
-    crypto_line = ""
-    if not user["crypto_private"]:
-        _crypto_rows, _crypto_invested, crypto_value, _crypto_profit = crypto_portfolio(user)
-        crypto_line = f"\n**{format_crypto_price(crypto_value)} Crypto held value**"
+    
+    lines = [
+        f"🍁 **{ctx.author.display_name}**, you currently have **{format_coins(user['wallet'])} uwuncy** in wallet (`{format_coins(user['bank'])}` in bank)!"
+    ]
 
-    marriage_line = ""
+    if not user.get("crypto_private"):
+        _crypto_rows, _crypto_invested, crypto_value, _crypto_profit = crypto_portfolio(user)
+        if crypto_value > 0:
+            lines.append(f"📈 **Crypto Portfolio:** `{format_crypto_price(crypto_value)}` uwuncy")
+
     partner_id = user.get("marriage_partner_id")
-    if partner_id:
+    if partner_id and not user.get("marriage_private"):
         partner_user = get_user(partner_id)
         partner_wallet = partner_user.get("wallet", 0)
         partner_bank = partner_user.get("bank", 0)
@@ -18452,29 +18457,53 @@ async def money(ctx):
             partner_name = partner_member.display_name
         except Exception:
             partner_name = f"Partner ({partner_id})"
-        marriage_line = f"\n💍 **Married to {partner_name}** • Partner: `{format_coins(partner_wallet)}` • Joint: `{format_coins(shared_total)}`"
+        lines.append(f"💍 **Married to {partner_name}** • Partner: `{format_coins(partner_wallet)}` • Joint: `{format_coins(shared_total)}`")
 
-    await ctx.send(
-        f"🍁 **{ctx.author.display_name}**, you currently have "
-        f"**{format_coins(user['wallet'])} uwuncy** in wallet (`{format_coins(user['bank'])}` in bank)!\n"
-        f"{crypto_line}{marriage_line}"
-    )
+    await ctx.send("\n".join(lines))
 
 
-async def set_crypto_privacy(ctx, private):
+async def set_crypto_privacy(ctx, private: bool):
     user = get_user(ctx.author.id)
     user["crypto_private"] = private
     save_data(DATA)
     if private:
-        await ctx.send(
-            "🔒 Crypto details are now private. "
-            "`uwu bal` and `uwu info` will only show your wallet."
-        )
+        await ctx.send("🔒 **Crypto status hidden!** `uwu bal` will no longer show your crypto holdings.")
     else:
-        await ctx.send(
-            "🔓 Crypto details are now visible. "
-            "`uwu bal` and `uwu info` will show your crypto information."
-        )
+        await ctx.send("🔓 **Crypto status visible!** `uwu bal` will show your crypto portfolio value.")
+
+
+async def set_marriage_privacy(ctx, private: bool):
+    user = get_user(ctx.author.id)
+    user["marriage_private"] = private
+    save_data(DATA)
+    if private:
+        await ctx.send("🔒 **Marriage status hidden!** `uwu bal` will no longer display marriage details.")
+    else:
+        await ctx.send("🔓 **Marriage status visible!** `uwu bal` will show marriage details.")
+
+
+@bot.command(name="hidecrypto", aliases=["crypto privacy off", "privatecrypto"])
+async def hidecrypto_cmd(ctx):
+    """Hide crypto holdings in uwu bal."""
+    await set_crypto_privacy(ctx, True)
+
+
+@bot.command(name="showcrypto", aliases=["crypto privacy on", "publiccrypto"])
+async def showcrypto_cmd(ctx):
+    """Show crypto holdings in uwu bal."""
+    await set_crypto_privacy(ctx, False)
+
+
+@bot.command(name="hidemarry", aliases=["hidemarriage", "privatemarry"])
+async def hidemarry_cmd(ctx):
+    """Hide marriage status in uwu bal."""
+    await set_marriage_privacy(ctx, True)
+
+
+@bot.command(name="showmarry", aliases=["showmarriage", "publicmarry"])
+async def showmarry_cmd(ctx):
+    """Show marriage status in uwu bal."""
+    await set_marriage_privacy(ctx, False)
 
 
 @bot.command(name="history", aliases=["bets", "recent"])
@@ -22951,6 +22980,8 @@ async def help_cmd(ctx, category: str = None):
                 ("fb", ",fb — view linked Facebook"),
                 ("marry", "@user — propose marriage to user"),
                 ("divorce", "end marriage status"),
+                ("hidemarry", "hide marriage status in uwu bal"),
+                ("showmarry", "show marriage status in uwu bal"),
                 ("ship", "@user @user — check love compatibility"),
             ],
         },
