@@ -4014,11 +4014,104 @@ async def _music_play_next(ctx, guild_id: str):
     await play_next_track(guild_id)
 
 
+async def add_track_to_queue(queue, track):
+    if not queue or not track:
+        return
+    if hasattr(queue, 'put_wait'):
+        try:
+            await queue.put_wait(track)
+            return
+        except Exception:
+            pass
+    if hasattr(queue, 'put'):
+        try:
+            res = queue.put(track)
+            if asyncio.iscoroutine(res):
+                await res
+            return
+        except Exception:
+            pass
+    if hasattr(queue, 'add'):
+        try:
+            res = queue.add(track)
+            if asyncio.iscoroutine(res):
+                await res
+            return
+        except Exception:
+            pass
+    if hasattr(queue, 'append'):
+        try:
+            queue.append(track)
+            return
+        except Exception:
+            pass
+
+
+def pop_next_track_from_queue(queue):
+    if not queue:
+        return None
+    try:
+        if hasattr(queue, 'is_empty') and queue.is_empty:
+            return None
+    except Exception:
+        pass
+
+    try:
+        if len(queue) == 0:
+            return None
+    except Exception:
+        pass
+
+    if hasattr(queue, 'get_at') and hasattr(queue, 'delete_at'):
+        try:
+            track = queue.get_at(0)
+            queue.delete_at(0)
+            if track:
+                return track
+        except Exception:
+            pass
+
+    if hasattr(queue, 'pop'):
+        try:
+            try:
+                return queue.pop(0)
+            except TypeError:
+                return queue.pop()
+        except Exception:
+            pass
+
+    if hasattr(queue, 'get_nowait'):
+        try:
+            return queue.get_nowait()
+        except Exception:
+            pass
+
+    if hasattr(queue, 'get'):
+        try:
+            res = queue.get()
+            if not asyncio.iscoroutine(res):
+                return res
+        except Exception:
+            pass
+
+    try:
+        track = queue[0]
+        del queue[0]
+        return track
+    except Exception:
+        pass
+
+    return None
+
+
 @bot.command(name='play', aliases=['!play', 'music', 'p'])
-async def play_cmd(ctx, *, search: str):
+async def play_cmd(ctx, *, search: str = None):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    
+
+    if not search:
+        return await ctx.send("Please provide a song name or Spotify/YouTube URL! Example: `uwu play Summer Crush`")
+
     if not ctx.author.voice:
         return await ctx.send("❌ Join a voice channel first!")
 
@@ -4052,40 +4145,32 @@ async def play_cmd(ctx, *, search: str):
     if not tracks:
         return await ctx.send("❌ Song not found!")
 
-    if isinstance(tracks, wavelink.Playlist):
-        playlist_tracks = tracks.tracks
+    is_playlist = isinstance(tracks, wavelink.Playlist) or hasattr(tracks, 'tracks')
+    if is_playlist:
+        playlist_tracks = getattr(tracks, 'tracks', tracks)
         if not playlist_tracks:
             return await ctx.send("❌ Playlist is empty!")
         first_track = playlist_tracks[0]
-        if not vc.playing:
+        if not getattr(vc, 'playing', False):
             res = vc.play(first_track)
             if asyncio.iscoroutine(res):
                 await res
             for track in playlist_tracks[1:]:
-                if hasattr(vc.queue, 'put_wait'):
-                    await vc.queue.put_wait(track)
-                else:
-                    vc.queue.put(track)
+                await add_track_to_queue(vc.queue, track)
             await ctx.send(f"🎶 Playing: **{getattr(first_track, 'title', 'Track')}** and queued **{len(playlist_tracks) - 1}** songs from playlist!")
         else:
             for track in playlist_tracks:
-                if hasattr(vc.queue, 'put_wait'):
-                    await vc.queue.put_wait(track)
-                else:
-                    vc.queue.put(track)
+                await add_track_to_queue(vc.queue, track)
             await ctx.send(f"✅ Added playlist with **{len(playlist_tracks)}** songs to the queue.")
     else:
         first_track = tracks[0] if isinstance(tracks, (list, tuple, wavelink.Search)) else tracks
-        if not vc.playing:
+        if not getattr(vc, 'playing', False):
             res = vc.play(first_track)
             if asyncio.iscoroutine(res):
                 await res
             await ctx.send(f"🎶 Now playing: **{getattr(first_track, 'title', 'Unknown Track')}**")
         else:
-            if hasattr(vc.queue, 'put_wait'):
-                await vc.queue.put_wait(first_track)
-            else:
-                vc.queue.put(first_track)
+            await add_track_to_queue(vc.queue, first_track)
             await ctx.send(f"✅ Added to queue: **{getattr(first_track, 'title', 'Unknown Track')}**")
 
 
@@ -4239,13 +4324,17 @@ async def on_wavelink_node_disconnected(node):
 async def on_wavelink_track_end(payload):
     try:
         player = getattr(payload, 'player', None)
+        reason = getattr(payload, 'reason', '')
         if not player or not hasattr(player, 'queue'):
             return
-        if not player.queue.is_empty and not getattr(player, 'playing', False):
-            next_track = player.queue.get()
-            res = player.play(next_track)
-            if asyncio.iscoroutine(res):
-                await res
+        if str(reason).lower() == 'replaced':
+            return
+        if not getattr(player, 'playing', False):
+            next_track = pop_next_track_from_queue(player.queue)
+            if next_track:
+                res = player.play(next_track)
+                if asyncio.iscoroutine(res):
+                    await res
     except Exception as exc:
         print(f"⚠️ Error in on_wavelink_track_end: {exc}")
 
@@ -4256,11 +4345,12 @@ async def on_wavelink_track_exception(payload):
         player = getattr(payload, 'player', None)
         track = getattr(payload, 'track', None)
         print(f"⚠️ Track exception for '{getattr(track, 'title', 'unknown')}': {getattr(payload, 'exception', '')}")
-        if player and hasattr(player, 'queue') and not player.queue.is_empty:
-            next_track = player.queue.get()
-            res = player.play(next_track)
-            if asyncio.iscoroutine(res):
-                await res
+        if player and hasattr(player, 'queue'):
+            next_track = pop_next_track_from_queue(player.queue)
+            if next_track:
+                res = player.play(next_track)
+                if asyncio.iscoroutine(res):
+                    await res
     except Exception as exc:
         print(f"⚠️ Error in on_wavelink_track_exception: {exc}")
 
@@ -4269,11 +4359,12 @@ async def on_wavelink_track_exception(payload):
 async def on_wavelink_track_stuck(payload):
     try:
         player = getattr(payload, 'player', None)
-        if player and hasattr(player, 'queue') and not player.queue.is_empty:
-            next_track = player.queue.get()
-            res = player.play(next_track)
-            if asyncio.iscoroutine(res):
-                await res
+        if player and hasattr(player, 'queue'):
+            next_track = pop_next_track_from_queue(player.queue)
+            if next_track:
+                res = player.play(next_track)
+                if asyncio.iscoroutine(res):
+                    await res
     except Exception as exc:
         print(f"⚠️ Error in on_wavelink_track_stuck: {exc}")
 
