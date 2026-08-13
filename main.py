@@ -236,53 +236,53 @@ BOT_HEARTBEAT_SECONDS = 15
 bot_lease_stop = threading.Event()
 
 # ==============================================
-# 🎵 LAVALINK NODES — AUTO-SWITCH ENABLED
+# 🎵 LAVALINK NODES CONFIG — AUTO-SWITCH ENABLED
 # Singapore FIRST = LOWEST PING for PH 🇵🇭
 # ==============================================
-LAVALINK_NODES = [
+LAVALINK_NODE_CONFIGS = [
     # 🏆 TOP — Singapore (BEST FOR PH!)
-    wavelink.Node(
-        uri="https://lavalinkv4.serenetia.com:443",
-        password="https://dsc.gg/ajidevserver",
-        retries=3
-    ),
-    wavelink.Node(
-        uri="https://sg.lavalink.heavencloud.in:443",
-        password="heavencloud",
-        retries=2
-    ),
-    wavelink.Node(
-        uri="http://sg1-nodelink.nyxbot.app:3000",
-        password="nyxbot.app/support",
-        retries=2
-    ),
+    {
+        "uri": "https://lavalinkv4.serenetia.com:443",
+        "password": "https://dsc.gg/ajidevserver",
+        "retries": 3,
+    },
+    {
+        "uri": "https://sg.lavalink.heavencloud.in:443",
+        "password": "heavencloud",
+        "retries": 2,
+    },
+    {
+        "uri": "http://sg1-nodelink.nyxbot.app:3000",
+        "password": "nyxbot.app/support",
+        "retries": 2,
+    },
     # ✅ GOOD — Backup Nodes
-    wavelink.Node(
-        uri="http://lavalink.darrenofficial.com:80",
-        password="anything",
-        retries=2
-    ),
-    wavelink.Node(
-        uri="https://lavalink.heavencloud.in:443",
-        password="heavencloud",
-        retries=2
-    ),
-    wavelink.Node(
-        uri="https://lavalink.devamop.in:443",
-        password="DevamOP",
-        retries=2
-    ),
+    {
+        "uri": "http://lavalink.darrenofficial.com:80",
+        "password": "anything",
+        "retries": 2,
+    },
+    {
+        "uri": "https://lavalink.heavencloud.in:443",
+        "password": "heavencloud",
+        "retries": 2,
+    },
+    {
+        "uri": "https://lavalink.devamop.in:443",
+        "password": "DevamOP",
+        "retries": 2,
+    },
     # ⚠️ FAIR — Last Resort Fallback
-    wavelink.Node(
-        uri="https://lava-v4.ajieblogs.eu.org:443",
-        password="https://dsc.gg/ajidevserver",
-        retries=1
-    ),
-    wavelink.Node(
-        uri="http://lavalink.jirayu.net:13592",
-        password="youshallnotpass",
-        retries=1
-    ),
+    {
+        "uri": "https://lava-v4.ajieblogs.eu.org:443",
+        "password": "https://dsc.gg/ajidevserver",
+        "retries": 1,
+    },
+    {
+        "uri": "http://lavalink.jirayu.net:13592",
+        "password": "youshallnotpass",
+        "retries": 1,
+    },
 ]
 
 FFMPEG_OPTIONS = {
@@ -18215,10 +18215,23 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_ready():
-    # ✅ === ADD THESE 2 NEW LINES FIRST ===
-    await wavelink.Pool.connect(nodes=LAVALINK_NODES, client=bot)
-    print(f"✅ Lavalink: {len(LAVALINK_NODES)} nodes loaded — Auto-Switch: ON! 🎶")
-    # ======================================
+    # ✅ Connect to Lavalink pool inside event loop
+    nodes = []
+    for cfg in LAVALINK_NODE_CONFIGS:
+        try:
+            node = wavelink.Node(**cfg)
+            nodes.append(node)
+        except Exception as exc:
+            print(f"⚠️ Failed to create Lavalink node {cfg.get('uri')}: {exc}")
+
+    if nodes:
+        try:
+            await wavelink.Pool.connect(nodes=nodes, client=bot)
+            print(f"✅ Lavalink: {len(nodes)} nodes loaded — Auto-Switch: ON! 🎶")
+        except Exception as exc:
+            print(f"⚠️ Lavalink Pool connection warning: {exc}")
+    else:
+        print("⚠️ No Lavalink nodes configured.")
 
     # ✅ YOUR EXISTING CODE — KEEP ALL OF THIS BELOW!
     print(f"✅ BOT ONLINE — LOGGED IN AS: {bot.user}")
