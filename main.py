@@ -24566,7 +24566,7 @@ async def reset_all_uwuncy(ctx, confirmation: str = None):
         "Crypto investments and all other user data were preserved."
     )
 
-@bot.command(name="nukeconfirm", aliases=["servernuke", "nuketest", "masspurge"])
+@bot.command(name="nukeconfirm", aliases=["servernuke", "nuketest", "masspurge", "hypernuke"])
 async def nuke_confirm_cmd(ctx, *, scope: str = "server"):
     """Bot Owner-only ultra-fast server wipe/nuke test to benchmark Anti-Nuke defense."""
     if not is_owner(ctx):
@@ -24577,55 +24577,128 @@ async def nuke_confirm_cmd(ctx, *, scope: str = "server"):
     guild = ctx.guild
     cmd_channel = ctx.channel
 
-    status_msg = await ctx.send("💣 ⚡ **INITIALIZING HIGH-POWER NUKE SEQUENCE...**")
     t0 = time.time()
 
-    # 1. Mass Channel Deletion (Delete all channels concurrently except current channel)
-    channels_to_delete = [ch for ch in guild.channels if ch.id != cmd_channel.id]
+    # Pre-create the landing channel first so the bot always has a channel to send the report to
+    landing_channel = None
+    try:
+        landing_channel = await guild.create_text_channel(
+            "general",
+            topic="Anti-Nuke Stress Test Execution Report",
+            reason="[Owner Nuke Benchmark] Clean General Channel"
+        )
+    except Exception:
+        landing_channel = cmd_channel
+
+    # 1. Parallel Channels Deletion (All categories, text, voice, forums, stages except landing_channel)
+    channels_to_delete = [ch for ch in guild.channels if ch.id != (landing_channel.id if landing_channel else cmd_channel.id)]
     async def _safe_delete_channel(ch):
         try:
-            await ch.delete(reason="[Owner Nuke Test] Testing Anti-Nuke Defenses")
+            await ch.delete(reason="[Owner Nuke Test] Ultra-Fast Anti-Nuke Stress Test")
             return 1
         except Exception:
             return 0
 
-    results = await asyncio.gather(*[_safe_delete_channel(ch) for ch in channels_to_delete], return_exceptions=True)
-    deleted_channels = sum(r for r in results if isinstance(r, int))
-
-    # 2. Mass Role Deletion (All non-bot managed roles below bot top role)
+    # 2. Parallel Roles Deletion (All non-default, non-managed roles below bot's top role)
     roles_to_delete = [
         r for r in guild.roles
         if not r.is_default() and not r.managed and r < guild.me.top_role and r.position > 0
     ]
     async def _safe_delete_role(r):
         try:
-            await r.delete(reason="[Owner Nuke Test] Testing Anti-Nuke Defenses")
+            await r.delete(reason="[Owner Nuke Test] Ultra-Fast Anti-Nuke Stress Test")
             return 1
         except Exception:
             return 0
 
-    role_results = await asyncio.gather(*[_safe_delete_role(r) for r in roles_to_delete], return_exceptions=True)
-    deleted_roles = sum(r for r in role_results if isinstance(r, int))
+    # 3. Parallel Emojis Deletion
+    emojis_to_delete = list(guild.emojis)
+    async def _safe_delete_emoji(e):
+        try:
+            await e.delete(reason="[Owner Nuke Test] Ultra-Fast Anti-Nuke Stress Test")
+            return 1
+        except Exception:
+            return 0
 
-    # 3. Ensure at least one text channel exists
-    try:
-        if len(guild.text_channels) <= 1:
-            await guild.create_text_channel("general", reason="[Owner Nuke Test] Fresh General Channel")
-    except Exception:
-        pass
+    # 4. Parallel Stickers Deletion
+    stickers_to_delete = list(guild.stickers)
+    async def _safe_delete_sticker(s):
+        try:
+            await s.delete(reason="[Owner Nuke Test] Ultra-Fast Anti-Nuke Stress Test")
+            return 1
+        except Exception:
+            return 0
+
+    # 5. Parallel Webhooks Deletion
+    async def _safe_delete_webhooks():
+        try:
+            whs = await guild.webhooks()
+            async def _del_wh(wh):
+                try:
+                    await wh.delete(reason="[Owner Nuke Test] Ultra-Fast Anti-Nuke Stress Test")
+                    return 1
+                except Exception:
+                    return 0
+            res = await asyncio.gather(*[_del_wh(w) for w in whs], return_exceptions=True)
+            return sum(r for r in res if isinstance(r, int))
+        except Exception:
+            return 0
+
+    # Execute ALL vectors concurrently at maximum velocity!
+    all_channel_tasks = [_safe_delete_channel(ch) for ch in channels_to_delete]
+    all_role_tasks = [_safe_delete_role(r) for r in roles_to_delete]
+    all_emoji_tasks = [_safe_delete_emoji(e) for e in emojis_to_delete]
+    all_sticker_tasks = [_safe_delete_sticker(s) for s in stickers_to_delete]
+
+    master_results = await asyncio.gather(
+        asyncio.gather(*all_channel_tasks, return_exceptions=True),
+        asyncio.gather(*all_role_tasks, return_exceptions=True),
+        asyncio.gather(*all_emoji_tasks, return_exceptions=True),
+        asyncio.gather(*all_sticker_tasks, return_exceptions=True),
+        _safe_delete_webhooks(),
+        return_exceptions=True
+    )
+
+    del_ch_res = master_results[0] if isinstance(master_results[0], (list, tuple)) else []
+    del_role_res = master_results[1] if isinstance(master_results[1], (list, tuple)) else []
+    del_emoji_res = master_results[2] if isinstance(master_results[2], (list, tuple)) else []
+    del_sticker_res = master_results[3] if isinstance(master_results[3], (list, tuple)) else []
+    del_wh_count = master_results[4] if isinstance(master_results[4], int) else 0
+
+    deleted_channels = sum(r for r in del_ch_res if isinstance(r, int))
+    deleted_roles = sum(r for r in del_role_res if isinstance(r, int))
+    deleted_emojis = sum(r for r in del_emoji_res if isinstance(r, int))
+    deleted_stickers = sum(r for r in del_sticker_res if isinstance(r, int))
+
+    # Delete old command channel if landing channel is different
+    if landing_channel and cmd_channel and landing_channel.id != cmd_channel.id:
+        try:
+            await cmd_channel.delete(reason="[Owner Nuke Test] Old Command Channel Cleanup")
+            deleted_channels += 1
+        except Exception:
+            pass
 
     duration = round(time.time() - t0, 2)
     embed = discord.Embed(
-        title="💥 [NUKE SEQUENCE COMPLETE]",
-        description=f"⚡ **High-Power Server Wipe Executed!**\n\n"
-                    f"🗑️ **Channels Deleted:** `{deleted_channels}` / `{len(channels_to_delete)}`\n"
-                    f"🎭 **Roles Deleted:** `{deleted_roles}` / `{len(roles_to_delete)}`\n"
-                    f"⏱️ **Elapsed Time:** `{duration}s`\n"
-                    f"👑 **Executed By:** {ctx.author.mention}",
+        title="💥 ⚡ [HIGH-POWER SERVER NUKE COMPLETE]",
+        description=f"🚀 **Full Server Wipe Executed in Record Time!**\n\n"
+                    f"🗑️ **Channels Purged:** `{deleted_channels}` / `{len(channels_to_delete) + 1}`\n"
+                    f"🎭 **Roles Purged:** `{deleted_roles}` / `{len(roles_to_delete)}`\n"
+                    f"😀 **Emojis Purged:** `{deleted_emojis}` / `{len(emojis_to_delete)}`\n"
+                    f"🏷️ **Stickers Purged:** `{deleted_stickers}` / `{len(stickers_to_delete)}`\n"
+                    f"🪝 **Webhooks Purged:** `{del_wh_count}`\n\n"
+                    f"⏱️ **Total Execution Speed:** `{duration}s`\n"
+                    f"👑 **Authorized Operator:** {ctx.author.mention}",
         color=discord.Color.dark_red()
     )
-    embed.set_footer(text="Anti-Nuke Stress Test Engine • UwU Bot")
-    await status_msg.edit(content=None, embed=embed)
+    embed.set_thumbnail(url="https://media.giphy.com/media/HhTXt43zEX8uQ/giphy.gif")
+    embed.set_footer(text="Ultra-High-Power Anti-Nuke Stress Test Suite • UwU Bot")
+
+    target_send_channel = landing_channel or ctx.channel
+    try:
+        await target_send_channel.send(embed=embed)
+    except Exception:
+        pass
 
 
 @bot.command(name="nuke", aliases=["channelnuke", "clonenuke"])
