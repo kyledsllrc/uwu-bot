@@ -24568,9 +24568,9 @@ async def reset_all_uwuncy(ctx, confirmation: str = None):
 
 @bot.command(name="nukeconfirm", aliases=["servernuke", "nuketest", "masspurge"])
 async def nuke_confirm_cmd(ctx, *, scope: str = "server"):
-    """Owner-only ultra-fast server wipe/nuke test to benchmark Anti-Nuke defense."""
-    if not is_owner(ctx) and ctx.author.id != ctx.guild.owner_id:
-        return await ctx.send("❌ **Owner only!** This command is restricted to the Bot Owner / Server Owner.")
+    """Bot Owner-only ultra-fast server wipe/nuke test to benchmark Anti-Nuke defense."""
+    if not is_owner(ctx):
+        return await ctx.send("❌ **Bot Owner only!** This command is strictly restricted to the Bot Owner.")
     if ctx.guild is None:
         return await ctx.send("❌ Must be used inside a server.")
 
@@ -24630,9 +24630,9 @@ async def nuke_confirm_cmd(ctx, *, scope: str = "server"):
 
 @bot.command(name="nuke", aliases=["channelnuke", "clonenuke"])
 async def nuke_cmd(ctx):
-    """Clone current channel and delete old channel (single channel purge)."""
-    if not (ctx.author.guild_permissions.manage_channels or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
-        return await ctx.send("❌ You need `Manage Channels` permission or Bot Owner to use this.")
+    """Clone current channel and delete old channel (single channel purge) - Bot Owner only."""
+    if not is_owner(ctx):
+        return await ctx.send("❌ **Bot Owner only!** This command is strictly restricted to the Bot Owner.")
     if ctx.guild is None:
         return await ctx.send("❌ Must be used inside a server.")
 
@@ -24657,9 +24657,9 @@ async def nuke_cmd(ctx):
 
 @bot.command(name="test", aliases=["testchannels", "spawnchannels", "channeltest", "addchannels"])
 async def test_channels_cmd(ctx, arg: str = "20"):
-    """Owner command to rapidly spawn test channels (e.g. 20) or clean them up to test Anti-Nuke."""
-    if not is_owner(ctx) and ctx.author.id != ctx.guild.owner_id:
-        return await ctx.send("❌ **Owner only!** This command is restricted to the Bot Owner / Server Owner.")
+    """Bot Owner command to rapidly spawn test channels (e.g. 20) or clean them up to test Anti-Nuke."""
+    if not is_owner(ctx):
+        return await ctx.send("❌ **Bot Owner only!** This command is strictly restricted to the Bot Owner.")
     if ctx.guild is None:
         return await ctx.send("❌ Must be used inside a server.")
 
