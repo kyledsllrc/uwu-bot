@@ -1955,7 +1955,7 @@ def build_suspicious_user_names(guild):
 
 
 async def check_and_ban_nuke_actor(guild, action_type, description, target_id=None):
-    """High-speed zero-latency audit log inspection and instant neutralization of nukers."""
+    """Ultra-high-speed zero-latency audit log inspection and instant neutralization of nukers."""
     if not guild or not guild.me:
         return
     settings = get_guild_moderation_settings(guild)
@@ -1968,11 +1968,12 @@ async def check_and_ban_nuke_actor(guild, action_type, description, target_id=No
         whitelist = {str(x) for x in settings.get("whitelist", [])}
         whitelist.add(str(guild.owner_id))
         whitelist.add(str(bot.user.id))
+        whitelist.add(str(BOT_OWNER_ID))
 
-        async for entry in guild.audit_logs(action=action_type, limit=5):
-            # Target check or recency check (< 5 seconds)
+        async for entry in guild.audit_logs(action=action_type, limit=8):
+            # Target check or recency check (< 8 seconds)
             if target_id is not None and getattr(entry.target, "id", None) != target_id:
-                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() > 5:
+                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() > 8:
                     continue
 
             actor = entry.user
@@ -1983,12 +1984,12 @@ async def check_and_ban_nuke_actor(guild, action_type, description, target_id=No
             u_actions = NUKE_ACTION_TRACKER.setdefault(str(guild.id), {}).setdefault(str(actor.id), deque(maxlen=20))
             u_actions.append((now_ts, description))
 
-            # 1. Instant Ban
+            # 1. Instant Parallel Neutralization: Ban + Strip Permissions
             banned = await ban_user_for_moderation(guild, actor, f"[Anti-Nuke Protection] {description}")
             if not banned:
                 await emergency_quarantine_actor(guild, actor)
 
-            # 2. Alert in channel
+            # 2. Alert in channel (or auto-recover an alert channel if all channels were wiped)
             dest = guild.system_channel
             if dest is None or not dest.permissions_for(guild.me).send_messages:
                 for ch in guild.text_channels:
@@ -1996,24 +1997,36 @@ async def check_and_ban_nuke_actor(guild, action_type, description, target_id=No
                         dest = ch
                         break
 
+            # If no channel exists (e.g. all channels deleted in nuke attempt), auto-create one!
+            if dest is None and guild.me.guild_permissions.manage_channels:
+                try:
+                    dest = await guild.create_text_channel(
+                        "antinuke-alerts",
+                        topic="Emergency Anti-Nuke Incident & Recovery Channel",
+                        reason="[Anti-Nuke] Auto-created emergency alert channel after mass channel wipe"
+                    )
+                except Exception:
+                    dest = None
+
             if dest:
                 try:
                     embed = discord.Embed(
-                        title="🚨 [CRITICAL] ANTI-NUKE TRIGGERED!",
-                        description=f"⚠️ **Server Attack Detected & Neutralized!**\n\n"
-                                    f"👤 **Attacker:** {actor.mention} (`{actor.name}` - ID: `{actor.id}`)\n"
-                                    f"🛑 **Action:** `{description}`\n"
-                                    f"⚡ **Outcome:** Offender Banned & Admin Permissions Stripped!\n"
+                        title="🚨 [CRITICAL] ANTI-NUKE SHIELD INTERCEPTED ATTACK!",
+                        description=f"⚡ **High-Velocity Server Attack Neutralized!**\n\n"
+                                    f"👤 **Rogue Actor:** {actor.mention} (`{actor.name}` - ID: `{actor.id}`)\n"
+                                    f"🛑 **Interception:** `{description}`\n"
+                                    f"🔨 **Defense Action:** Instantly Banned & Admin Roles Revoked\n"
                                     f"🔒 Server protected by **UwU Bot Anti-Nuke Shield**.",
                         color=discord.Color.red()
                     )
-                    embed.set_thumbnail(url=str(actor.display_avatar.url) if hasattr(actor, "display_avatar") else "")
-                    embed.set_footer(text="Anti-Nuke Engine • Ultra-Speed Protection")
+                    if hasattr(actor, "display_avatar") and actor.display_avatar:
+                        embed.set_thumbnail(url=str(actor.display_avatar.url))
+                    embed.set_footer(text="Anti-Nuke Defense Engine • Real-Time Protection")
                     await dest.send(embed=embed)
                 except Exception:
                     pass
 
-            await log_moderation_action(guild, f"🚨 **Anti-Nuke Action:** Banned `{actor}` ({actor.id}) after `{description}`.")
+            await log_moderation_action(guild, f"🚨 **Anti-Nuke Action:** Neutralized & Banned `{actor}` ({actor.id}) after `{description}`.")
             return
     except discord.Forbidden:
         return
@@ -18477,7 +18490,7 @@ async def on_guild_channel_delete(channel):
 @bot.event
 async def on_guild_channel_create(channel):
     guild = channel.guild
-    if not guild:
+    if not guild or not guild.me:
         return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
@@ -18486,10 +18499,14 @@ async def on_guild_channel_create(channel):
     # Check for rogue channel creation nuke
     try:
         if guild.me.guild_permissions.view_audit_log:
-            async for entry in guild.audit_logs(action=discord.AuditLogAction.channel_create, limit=3):
-                if getattr(entry.target, "id", None) == channel.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 4:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.channel_create, limit=4):
+                if getattr(entry.target, "id", None) == channel.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
                     actor = entry.user
-                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                    whitelist = {str(x) for x in settings.get("whitelist", [])}
+                    whitelist.add(str(guild.owner_id))
+                    whitelist.add(str(bot.user.id))
+                    whitelist.add(str(BOT_OWNER_ID))
+                    if actor and str(actor.id) not in whitelist:
                         try:
                             await channel.delete(reason="[Anti-Nuke] Unauthorized channel creation spam")
                         except Exception:
@@ -18514,7 +18531,7 @@ async def on_guild_role_delete(role):
 @bot.event
 async def on_guild_role_create(role):
     guild = role.guild
-    if not guild:
+    if not guild or not guild.me:
         return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
@@ -18522,12 +18539,16 @@ async def on_guild_role_create(role):
 
     try:
         if guild.me.guild_permissions.view_audit_log:
-            async for entry in guild.audit_logs(action=discord.AuditLogAction.role_create, limit=3):
-                if getattr(entry.target, "id", None) == role.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 4:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.role_create, limit=4):
+                if getattr(entry.target, "id", None) == role.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
                     actor = entry.user
-                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                    whitelist = {str(x) for x in settings.get("whitelist", [])}
+                    whitelist.add(str(guild.owner_id))
+                    whitelist.add(str(bot.user.id))
+                    whitelist.add(str(BOT_OWNER_ID))
+                    if actor and str(actor.id) not in whitelist:
                         try:
-                            await role.delete(reason="[Anti-Nuke] Unauthorized role creation")
+                            await role.delete(reason="[Anti-Nuke] Unauthorized role creation spam")
                         except Exception:
                             pass
                         await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Unauthorized Role Creation Spam")
@@ -18538,21 +18559,66 @@ async def on_guild_role_create(role):
 
 
 @bot.event
+async def on_guild_role_update(before, after):
+    guild = after.guild
+    if not guild or not guild.me:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+
+    # Check if dangerous permissions were added (e.g. administrator, manage_guild, manage_roles, mention_everyone)
+    dangerous_added = (
+        (not before.permissions.administrator and after.permissions.administrator) or
+        (not before.permissions.manage_guild and after.permissions.manage_guild) or
+        (not before.permissions.manage_roles and after.permissions.manage_roles) or
+        (not before.permissions.manage_channels and after.permissions.manage_channels) or
+        (not before.permissions.ban_members and after.permissions.ban_members)
+    )
+
+    if dangerous_added:
+        try:
+            if guild.me.guild_permissions.view_audit_log:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.role_update, limit=4):
+                    if getattr(entry.target, "id", None) == after.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
+                        actor = entry.user
+                        whitelist = {str(x) for x in settings.get("whitelist", [])}
+                        whitelist.add(str(guild.owner_id))
+                        whitelist.add(str(bot.user.id))
+                        whitelist.add(str(BOT_OWNER_ID))
+                        if actor and str(actor.id) not in whitelist:
+                            # Revert role permissions immediately
+                            try:
+                                await after.edit(permissions=before.permissions, reason="[Anti-Nuke] Reverting unauthorized dangerous permission grant")
+                            except Exception:
+                                pass
+                            await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Unauthorized Privilege Escalation / Admin Role Modification")
+                            await emergency_quarantine_actor(guild, actor)
+                            return
+        except Exception:
+            pass
+
+
+@bot.event
 async def on_member_ban(guild, user):
-    if not guild:
+    if not guild or not guild.me:
         return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
         return
     try:
         if guild.me.guild_permissions.view_audit_log:
-            async for entry in guild.audit_logs(action=discord.AuditLogAction.ban, limit=3):
-                if getattr(entry.target, "id", None) == user.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 4:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.ban, limit=4):
+                if getattr(entry.target, "id", None) == user.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
                     actor = entry.user
-                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
-                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Mass Ban Nuke Attack")
+                    whitelist = {str(x) for x in settings.get("whitelist", [])}
+                    whitelist.add(str(guild.owner_id))
+                    whitelist.add(str(bot.user.id))
+                    whitelist.add(str(BOT_OWNER_ID))
+                    if actor and str(actor.id) not in whitelist:
+                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Mass Ban Rogue Attack")
                         await emergency_quarantine_actor(guild, actor)
-                        # Revert ban on victim
+                        # Revert ban on victim in parallel
                         try:
                             await guild.unban(user, reason="[Anti-Nuke] Rollback unauthorized rogue ban")
                         except Exception:
@@ -18565,17 +18631,21 @@ async def on_member_ban(guild, user):
 @bot.event
 async def on_webhooks_update(channel):
     guild = channel.guild
-    if not guild:
+    if not guild or not guild.me:
         return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
         return
     try:
         if guild.me.guild_permissions.view_audit_log:
-            async for entry in guild.audit_logs(action=discord.AuditLogAction.webhook_create, limit=3):
-                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.webhook_create, limit=4):
+                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
                     actor = entry.user
-                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                    whitelist = {str(x) for x in settings.get("whitelist", [])}
+                    whitelist.add(str(guild.owner_id))
+                    whitelist.add(str(bot.user.id))
+                    whitelist.add(str(BOT_OWNER_ID))
+                    if actor and str(actor.id) not in whitelist:
                         # Delete created webhooks
                         try:
                             hooks = await channel.webhooks()
@@ -18594,16 +18664,22 @@ async def on_webhooks_update(channel):
 @bot.event
 async def on_guild_update(before, after):
     guild = after
+    if not guild or not guild.me:
+        return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
         return
-    if before.name != after.name or before.icon != after.icon:
+    if before.name != after.name or before.icon != after.icon or before.description != after.description:
         try:
             if guild.me.guild_permissions.view_audit_log:
-                async for entry in guild.audit_logs(action=discord.AuditLogAction.guild_update, limit=3):
-                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.guild_update, limit=4):
+                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
                         actor = entry.user
-                        if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        whitelist = {str(x) for x in settings.get("whitelist", [])}
+                        whitelist.add(str(guild.owner_id))
+                        whitelist.add(str(bot.user.id))
+                        whitelist.add(str(BOT_OWNER_ID))
+                        if actor and str(actor.id) not in whitelist:
                             await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Unauthorized Server Vandalism")
                             await emergency_quarantine_actor(guild, actor)
                             return
@@ -18613,17 +18689,48 @@ async def on_guild_update(before, after):
 
 @bot.event
 async def on_guild_emojis_update(guild, before, after):
+    if not guild or not guild.me:
+        return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
         return
     if len(before) > len(after):
         try:
             if guild.me.guild_permissions.view_audit_log:
-                async for entry in guild.audit_logs(action=discord.AuditLogAction.emoji_delete, limit=3):
-                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.emoji_delete, limit=4):
+                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
                         actor = entry.user
-                        if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        whitelist = {str(x) for x in settings.get("whitelist", [])}
+                        whitelist.add(str(guild.owner_id))
+                        whitelist.add(str(bot.user.id))
+                        whitelist.add(str(BOT_OWNER_ID))
+                        if actor and str(actor.id) not in whitelist:
                             await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Mass Emoji Deletion")
+                            await emergency_quarantine_actor(guild, actor)
+                            return
+        except Exception:
+            pass
+
+
+@bot.event
+async def on_guild_stickers_update(guild, before, after):
+    if not guild or not guild.me:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+    if len(before) > len(after):
+        try:
+            if guild.me.guild_permissions.view_audit_log:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.sticker_delete, limit=4):
+                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 6:
+                        actor = entry.user
+                        whitelist = {str(x) for x in settings.get("whitelist", [])}
+                        whitelist.add(str(guild.owner_id))
+                        whitelist.add(str(bot.user.id))
+                        whitelist.add(str(BOT_OWNER_ID))
+                        if actor and str(actor.id) not in whitelist:
+                            await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Mass Sticker Deletion")
                             await emergency_quarantine_actor(guild, actor)
                             return
         except Exception:
