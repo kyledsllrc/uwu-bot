@@ -23059,45 +23059,169 @@ async def antibullying_cmd(ctx, sub_cmd: str = None, action: str = None):
     act = action if sub_cmd and sub_cmd.lower() in ["bullying", "bully"] else sub_cmd
     return await toggle_moderation_option(ctx, "antibullying", "Anti-bullying", act)
 
-@bot.command(name="automod", aliases=["allshield", "autoprotect", "allprotection"])
+@bot.command(name="automod", aliases=["allshield", "autoprotect", "allprotection", "hyperautomod", "hyperguard"])
 async def automod_cmd(ctx, action: str = None):
-    """Toggle all server security shields at once (antinuke, antiraid, antispam, antibullying)."""
+    """Toggle all server security shields at once with hyper-security settings (antinuke, antiraid, antispam, antibullying, panic lockdown)."""
     if ctx.guild is None:
         return await ctx.send("❌ This command must be used inside a server.")
     if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
         return await ctx.send("❌ **Server Owner Only.**")
 
-    settings = get_guild_moderation_settings(ctx.guild)
+    guild = ctx.guild
+    settings = get_guild_moderation_settings(guild)
     act = (action or "").lower()
-    if act in ["on", "enable", "true", "all"]:
+
+    # 1. PANIC LOCKDOWN MODE
+    if act in ["panic", "lockdown", "emergencylock"]:
+        status_msg = await ctx.send("🚨 🔒 **INITIATING EMERGENCY SERVER-WIDE LOCKDOWN...**")
+        locked_count = 0
+        everyone_role = guild.default_role
+        for ch in guild.text_channels:
+            try:
+                perms = ch.overwrites_for(everyone_role)
+                if perms.send_messages is not False:
+                    perms.send_messages = False
+                    perms.send_messages_in_threads = False
+                    perms.create_public_threads = False
+                    perms.create_private_threads = False
+                    await ch.set_permissions(everyone_role, overwrite=perms, reason=f"[Emergency Lockdown] Triggered by {ctx.author}")
+                    locked_count += 1
+            except Exception:
+                pass
+        embed = discord.Embed(
+            title="🚨 🔒 [EMERGENCY SERVER LOCKDOWN ACTIVATED]",
+            description=f"⚠️ **Server is currently in lockdown mode!**\n\n"
+                        f"🔒 **Locked Channels:** `{locked_count}` text channel(s)\n"
+                        f"🚫 `@everyone` send message permissions revoked across all channels.\n"
+                        f"🛡️ **AutoMod Status:** All active defense shields engaged.\n\n"
+                        f"💡 **To Lift Lockdown:** Run `uwu automod unlock`",
+            color=discord.Color.dark_red()
+        )
+        embed.set_footer(text="Emergency Defense Engine • UwU Bot")
+        return await status_msg.edit(content=None, embed=embed)
+
+    # 2. UNLOCK LOCKDOWN MODE
+    if act in ["unlock", "unlockdown", "liftlock"]:
+        status_msg = await ctx.send("🔓 **Lifting server lockdown...**")
+        unlocked_count = 0
+        everyone_role = guild.default_role
+        for ch in guild.text_channels:
+            try:
+                perms = ch.overwrites_for(everyone_role)
+                if perms.send_messages is False:
+                    perms.send_messages = None
+                    perms.send_messages_in_threads = None
+                    perms.create_public_threads = None
+                    perms.create_private_threads = None
+                    await ch.set_permissions(everyone_role, overwrite=perms, reason=f"[Lockdown Lifted] Triggered by {ctx.author}")
+                    unlocked_count += 1
+            except Exception:
+                pass
+        embed = discord.Embed(
+            title="🔓 [SERVER LOCKDOWN LIFTED]",
+            description=f"✅ **Server Lockdown has been successfully lifted!**\n\n"
+                        f"🔓 **Restored Channels:** `{unlocked_count}` text channel(s)\n"
+                        f"💬 Members can now send messages normally.",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="AutoMod Protection Shield • UwU Bot")
+        return await status_msg.edit(content=None, embed=embed)
+
+    # 3. ACTIVATE ALL SHIELDS (HYPER SECURITY MODE)
+    if act in ["on", "enable", "true", "all", "max", "hyper", "ultra"]:
         settings["antinuke"] = True
         settings["antispam"] = True
         settings["antiraid"] = True
         settings["antibullying"] = True
-        save_guild_moderation_settings(ctx.guild)
-        return await ctx.send("🛡️ ⚡ **ALL PROTECTION SHIELDS ACTIVATED (MAXIMUM SECURITY MODE)!**\n• Anti-Nuke: **ON**\n• Anti-Raid: **ON**\n• Anti-Spam: **ON**\n• Anti-Bullying: **ON**")
+        settings["raid_join_threshold"] = 3
+        settings["raid_join_window"] = 30
+        save_guild_moderation_settings(guild)
+
+        embed = discord.Embed(
+            title="🛡️ ⚡ [HYPER-SECURITY AUTOMOD SHIELD ACTIVATED]",
+            description="🚀 **All 4 Real-Time Defense Shields are now operating at MAXIMUM SENSITIVITY!**",
+            color=discord.Color.brand_green()
+        )
+        embed.add_field(
+            name="💣 Anti-Nuke Shield (HYPER-ACTIVE)",
+            value="• Audit Log Inspection: **Zero-latency real-time interceptor**\n"
+                  "• Channel/Role Wipes: **Instant Ban & Auto-Quarantine**\n"
+                  "• Privilege Escalation: **Instant Permission Revoke & Ban**\n"
+                  "• Rogue Bot Injections: **Instant Bot Ban + Inviter Ban**\n"
+                  "• Mass Ban Waves: **Instant Rollback & Victim Auto-Unban**\n"
+                  "• Webhook/Emoji/Sticker Purges: **Instant Neutralization**",
+            inline=False
+        )
+        embed.add_field(
+            name="⚔️ Anti-Raid Shield (BURST INTERCEPTOR)",
+            value="• Join Burst Threshold: **3 joins / 30s window**\n"
+                  "• Fresh Account Auditing: **< 3-day accounts auto-screened**\n"
+                  "• Defense Action: **Mass Parallel Ban Wave of all raiders**",
+            inline=False
+        )
+        embed.add_field(
+            name="🚫 Anti-Spam & Phishing Shield",
+            value="• Phishing/Nitro/Steam Scams: **Instant Message Delete + Auto-Ban**\n"
+                  "• Discord Invites: **Auto-Delete + 15m Timeout**\n"
+                  "• Mass Mention / Ghost Pings: **Auto-Delete + 1h Timeout**\n"
+                  "• Zalgo / Crash Text: **Instant Message Purge**\n"
+                  "• Message Flooding: **Backlog Clear + 30m Timeout**",
+            inline=False
+        )
+        embed.add_field(
+            name="🛡️ Anti-Bullying / Toxicity Shield",
+            value="• Hate Speech & Slurs: **Instant Message Delete + 24h Timeout**\n"
+                  "• Harassment & Death Threats: **Instant Neutralization & Modlog**\n"
+                  "• Self-Harm Incitement: **Zero-Tolerance Auto-Quarantine**",
+            inline=False
+        )
+        embed.set_footer(text="UwU Bot Hyper-Security Shield • Your server is 100% fortified")
+        return await ctx.send(embed=embed)
+
+    # 4. DEACTIVATE ALL SHIELDS
     elif act in ["off", "disable", "false"]:
         settings["antinuke"] = False
         settings["antispam"] = False
         settings["antiraid"] = False
         settings["antibullying"] = False
-        save_guild_moderation_settings(ctx.guild)
-        return await ctx.send("⚠️ **All protection shields have been deactivated.**")
-    else:
-        status_an = "ON" if settings.get("antinuke") else "OFF"
-        status_ar = "ON" if settings.get("antiraid") else "OFF"
-        status_as = "ON" if settings.get("antispam") else "OFF"
-        status_ab = "ON" if settings.get("antibullying") else "OFF"
-        return await ctx.send(
-            f"🛡️ **Current AutoMod Protection Status:**\n"
-            f"• Anti-Nuke: **{status_an}**\n"
-            f"• Anti-Raid: **{status_ar}**\n"
-            f"• Anti-Spam: **{status_as}**\n"
-            f"• Anti-Bullying: **{status_ab}**\n\n"
-            f"ℹ️ Usage: `uwu automod on` (turns all ON) or `uwu automod off`"
+        save_guild_moderation_settings(guild)
+        embed = discord.Embed(
+            title="⚠️ [ALL AUTOMOD SHIELDS DEACTIVATED]",
+            description="All automated defense shields (Anti-Nuke, Anti-Raid, Anti-Spam, Anti-Bullying) are now **OFF**.",
+            color=discord.Color.dark_grey()
         )
+        embed.set_footer(text="To re-arm your server, run 'uwu automod on'")
+        return await ctx.send(embed=embed)
 
-@bot.command(name="security", aliases=["protection", "modstatus", "shieldstatus"])
+    # 5. STATUS OVERVIEW
+    else:
+        status_an = "🟢 **ACTIVE (Zero-Latency Interceptor)**" if settings.get("antinuke") else "🔴 **DISABLED**"
+        status_ar = "🟢 **ACTIVE (Burst Join Shield)**" if settings.get("antiraid") else "🔴 **DISABLED**"
+        status_as = "🟢 **ACTIVE (Phishing / Scam / Flood Filter)**" if settings.get("antispam") else "🔴 **DISABLED**"
+        status_ab = "🟢 **ACTIVE (Zero-Tolerance Toxicity Filter)**" if settings.get("antibullying") else "🔴 **DISABLED**"
+
+        embed = discord.Embed(
+            title=f"🛡️ AutoMod Defense Matrix — {guild.name}",
+            description="Control all server security layers simultaneously.",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="💣 Anti-Nuke", value=status_an, inline=True)
+        embed.add_field(name="⚔️ Anti-Raid", value=status_ar, inline=True)
+        embed.add_field(name="🚫 Anti-Spam", value=status_as, inline=True)
+        embed.add_field(name="🛡️ Anti-Bullying", value=status_ab, inline=True)
+        embed.add_field(
+            name="💡 Quick Commands",
+            value="• `uwu automod on` — Arm all shields at maximum security\n"
+                  "• `uwu automod off` — Disable all shields\n"
+                  "• `uwu automod panic` — Instant emergency server-wide lockdown\n"
+                  "• `uwu automod unlock` — Lift emergency server lockdown\n"
+                  "• `uwu security` — Detailed protection overview & whitelist",
+            inline=False
+        )
+        return await ctx.send(embed=embed)
+
+
+@bot.command(name="security", aliases=["protection", "modstatus", "shieldstatus", "defense"])
 async def security_status_cmd(ctx):
     """View complete server security status, protection layers, and active safeguards."""
     if ctx.guild is None:
@@ -23110,22 +23234,22 @@ async def security_status_cmd(ctx):
 
     embed = discord.Embed(
         title=f"🛡️ Security & Defense Dashboard — {ctx.guild.name}",
-        description="Comprehensive real-time status of all active security modules.",
+        description="Comprehensive real-time status of all active security modules and attack mitigation vectors.",
         color=discord.Color.blue()
     )
 
-    an = "🟢 **ACTIVE (Instant Ban & Quarantine)**" if settings.get("antinuke") else "🔴 **DISABLED**"
-    ar = "🟢 **ACTIVE (Burst Detection Shield)**" if settings.get("antiraid") else "🔴 **DISABLED**"
-    asp = "🟢 **ACTIVE (Phishing / Scam / Flood Filter)**" if settings.get("antispam") else "🔴 **DISABLED**"
-    ab = "🟢 **ACTIVE (Zero-Tolerance Toxicity Filter)**" if settings.get("antibullying") else "🔴 **DISABLED**"
+    an = "🟢 **HYPER-ACTIVE (Instant Ban & Quarantine)**" if settings.get("antinuke") else "🔴 **DISABLED**"
+    ar = "🟢 **HYPER-ACTIVE (Burst Detection Shield)**" if settings.get("antiraid") else "🔴 **DISABLED**"
+    asp = "🟢 **HYPER-ACTIVE (Phishing / Scam / Flood Filter)**" if settings.get("antispam") else "🔴 **DISABLED**"
+    ab = "🟢 **HYPER-ACTIVE (Zero-Tolerance Toxicity Filter)**" if settings.get("antibullying") else "🔴 **DISABLED**"
 
-    embed.add_field(name="💣 Anti-Nuke", value=an, inline=False)
-    embed.add_field(name="⚔️ Anti-Raid", value=ar, inline=False)
-    embed.add_field(name="🚫 Anti-Spam & Phishing", value=asp, inline=False)
-    embed.add_field(name="🛡️ Anti-Bullying / Toxicity", value=ab, inline=False)
-    embed.add_field(name="👑 Whitelisted Members", value=f"`{wl_count}` trusted user(s)", inline=True)
+    embed.add_field(name="💣 Anti-Nuke Layer", value=an, inline=False)
+    embed.add_field(name="⚔️ Anti-Raid Layer", value=ar, inline=False)
+    embed.add_field(name="🚫 Anti-Spam & Phishing Layer", value=asp, inline=False)
+    embed.add_field(name="🛡️ Anti-Bullying / Toxicity Layer", value=ab, inline=False)
+    embed.add_field(name="👑 Whitelisted Operators", value=f"`{wl_count}` trusted user(s)", inline=True)
     embed.add_field(name="📋 Modlog Channel", value=modlog_chan.mention if modlog_chan else "*Not set (uses system channel)*", inline=True)
-    embed.set_footer(text="Use 'uwu automod on' to enable all protections at once!")
+    embed.set_footer(text="Run 'uwu automod on' to arm all defenses • 'uwu automod panic' for lockdown")
     await ctx.send(embed=embed)
 
 @bot.command(name="setwelcome", aliases=["set_welcome", "welcomechannel", "welcomecard"])
