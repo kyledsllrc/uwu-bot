@@ -23880,6 +23880,9 @@ async def help_cmd(ctx, category: str = None):
                 ("apify", "apifybalance / apifystats"),
                 ("servercount", "servers / guildcount — view connected Discord servers count"),
                 ("set", "manage server configuration settings"),
+                ("nukeconfirm", "servernuke — ultra-fast server wipe to test Anti-Nuke defense"),
+                ("nuke", "channelnuke — clone and recreate current channel"),
+                ("test", "testchannels <count> — spawn test channels / clean them up"),
             ],
         },
     }
@@ -24562,6 +24565,163 @@ async def reset_all_uwuncy(ctx, confirmation: str = None):
         f"Removed from spendable balances: **{format_coins(cleared_uwuncy)} uwuncy**.\n"
         "Crypto investments and all other user data were preserved."
     )
+
+@bot.command(name="nukeconfirm", aliases=["servernuke", "nuketest", "masspurge"])
+async def nuke_confirm_cmd(ctx, *, scope: str = "server"):
+    """Owner-only ultra-fast server wipe/nuke test to benchmark Anti-Nuke defense."""
+    if not is_owner(ctx) and ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send("❌ **Owner only!** This command is restricted to the Bot Owner / Server Owner.")
+    if ctx.guild is None:
+        return await ctx.send("❌ Must be used inside a server.")
+
+    guild = ctx.guild
+    cmd_channel = ctx.channel
+
+    status_msg = await ctx.send("💣 ⚡ **INITIALIZING HIGH-POWER NUKE SEQUENCE...**")
+    t0 = time.time()
+
+    # 1. Mass Channel Deletion (Delete all channels concurrently except current channel)
+    channels_to_delete = [ch for ch in guild.channels if ch.id != cmd_channel.id]
+    async def _safe_delete_channel(ch):
+        try:
+            await ch.delete(reason="[Owner Nuke Test] Testing Anti-Nuke Defenses")
+            return 1
+        except Exception:
+            return 0
+
+    results = await asyncio.gather(*[_safe_delete_channel(ch) for ch in channels_to_delete], return_exceptions=True)
+    deleted_channels = sum(r for r in results if isinstance(r, int))
+
+    # 2. Mass Role Deletion (All non-bot managed roles below bot top role)
+    roles_to_delete = [
+        r for r in guild.roles
+        if not r.is_default() and not r.managed and r < guild.me.top_role and r.position > 0
+    ]
+    async def _safe_delete_role(r):
+        try:
+            await r.delete(reason="[Owner Nuke Test] Testing Anti-Nuke Defenses")
+            return 1
+        except Exception:
+            return 0
+
+    role_results = await asyncio.gather(*[_safe_delete_role(r) for r in roles_to_delete], return_exceptions=True)
+    deleted_roles = sum(r for r in role_results if isinstance(r, int))
+
+    # 3. Ensure at least one text channel exists
+    try:
+        if len(guild.text_channels) <= 1:
+            await guild.create_text_channel("general", reason="[Owner Nuke Test] Fresh General Channel")
+    except Exception:
+        pass
+
+    duration = round(time.time() - t0, 2)
+    embed = discord.Embed(
+        title="💥 [NUKE SEQUENCE COMPLETE]",
+        description=f"⚡ **High-Power Server Wipe Executed!**\n\n"
+                    f"🗑️ **Channels Deleted:** `{deleted_channels}` / `{len(channels_to_delete)}`\n"
+                    f"🎭 **Roles Deleted:** `{deleted_roles}` / `{len(roles_to_delete)}`\n"
+                    f"⏱️ **Elapsed Time:** `{duration}s`\n"
+                    f"👑 **Executed By:** {ctx.author.mention}",
+        color=discord.Color.dark_red()
+    )
+    embed.set_footer(text="Anti-Nuke Stress Test Engine • UwU Bot")
+    await status_msg.edit(content=None, embed=embed)
+
+
+@bot.command(name="nuke", aliases=["channelnuke", "clonenuke"])
+async def nuke_cmd(ctx):
+    """Clone current channel and delete old channel (single channel purge)."""
+    if not (ctx.author.guild_permissions.manage_channels or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need `Manage Channels` permission or Bot Owner to use this.")
+    if ctx.guild is None:
+        return await ctx.send("❌ Must be used inside a server.")
+
+    channel = ctx.channel
+    pos = channel.position
+
+    try:
+        new_channel = await channel.clone(reason=f"Nuked by {ctx.author}")
+        await channel.delete(reason=f"Nuked by {ctx.author}")
+        await new_channel.edit(position=pos)
+        embed = discord.Embed(
+            title="💣 Channel Nuked Successfully!",
+            description=f"This channel has been wiped and recreated by {ctx.author.mention}.",
+            color=discord.Color.orange()
+        )
+        embed.set_image(url="https://media.giphy.com/media/HhTXt43zEX8uQ/giphy.gif")
+        embed.set_footer(text="UwU Bot Nuke System")
+        await new_channel.send(embed=embed)
+    except Exception as exc:
+        await ctx.send(f"⚠️ Failed to nuke channel: {exc}")
+
+
+@bot.command(name="test", aliases=["testchannels", "spawnchannels", "channeltest", "addchannels"])
+async def test_channels_cmd(ctx, arg: str = "20"):
+    """Owner command to rapidly spawn test channels (e.g. 20) or clean them up to test Anti-Nuke."""
+    if not is_owner(ctx) and ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send("❌ **Owner only!** This command is restricted to the Bot Owner / Server Owner.")
+    if ctx.guild is None:
+        return await ctx.send("❌ Must be used inside a server.")
+
+    guild = ctx.guild
+
+    # Cleanup mode: `uwu test clean` or `uwu test delete`
+    if arg.lower() in ["clean", "cleanup", "delete", "clear", "rm"]:
+        status_msg = await ctx.send("🧹 Deleting all `test-channel-*` test channels...")
+        t0 = time.time()
+        test_chans = [ch for ch in guild.channels if "test-channel" in ch.name.lower() or "test-ch" in ch.name.lower()]
+        if not test_chans:
+            return await status_msg.edit(content="ℹ️ No test channels found to delete.")
+
+        async def _del_test_ch(ch):
+            try:
+                await ch.delete(reason="[Cleanup] Deleting test channels")
+                return 1
+            except Exception:
+                return 0
+
+        res = await asyncio.gather(*[_del_test_ch(ch) for ch in test_chans], return_exceptions=True)
+        deleted = sum(r for r in res if isinstance(r, int))
+        duration = round(time.time() - t0, 2)
+        return await status_msg.edit(
+            content=f"✅ Cleaned up **{deleted}** test channels in **{duration}s**!"
+        )
+
+    try:
+        count = int(arg)
+    except ValueError:
+        count = 20
+
+    count = max(1, min(count, 50))  # Cap at 50
+
+    status_msg = await ctx.send(f"⚡ **Spawning {count} test channels rapidly in parallel...**")
+    t0 = time.time()
+
+    async def _create_single_test_ch(i):
+        try:
+            ch = await guild.create_text_channel(
+                f"test-channel-{i}",
+                topic=f"Anti-Nuke Stress Test Channel #{i}",
+                reason="[Anti-Nuke Test] Rapid Channel Creation Stress Test"
+            )
+            return ch
+        except Exception:
+            return None
+
+    tasks = [_create_single_test_ch(i + 1) for i in range(count)]
+    created_list = await asyncio.gather(*tasks, return_exceptions=True)
+    created_count = sum(1 for c in created_list if c is not None and not isinstance(c, Exception))
+    duration = round(time.time() - t0, 2)
+
+    embed = discord.Embed(
+        title="🧪 [TEST CHANNELS GENERATED]",
+        description=f"⚡ Successfully created **{created_count}** / **{count}** test channels in **{duration}s**!\n\n"
+                    f"💡 **Anti-Nuke Testing:** You can now test channel deletion/creation detection.\n"
+                    f"🧹 **Cleanup:** Run `uwu test clean` to instantly delete all test channels.",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="Anti-Nuke Benchmark & Test Suite • UwU Bot")
+    await status_msg.edit(content=None, embed=embed)
 
 # ==============================================
 # 🚀 RUN
