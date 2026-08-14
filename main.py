@@ -1231,10 +1231,13 @@ async def set_category_state(ctx, category, enabled):
 # 🛡️ GUILD MODERATION STATE
 # ==============================================
 SERVER_MODERATION_KEY = "_server_moderation"
-SPAM_TRACKER = {}
-RAID_JOIN_TRACKER = {}
-SUSPICIOUS_USERS = {}
-GUILD_INVITES_CACHE = {}  # { guild_id: { code: uses } }
+SPAM_TRACKER = {}               # { guild_id: { user_id: deque([(timestamp, content), ...]) } }
+SPAM_MESSAGES_CACHE = {}        # { guild_id: { user_id: deque([message, ...]) } }
+RAID_JOIN_TRACKER = {}          # { guild_id: deque([(timestamp, user_id, is_bot, account_age_days), ...]) }
+NUKE_ACTION_TRACKER = {}        # { guild_id: { user_id: deque([(timestamp, action_type), ...]) } }
+SUSPICIOUS_USERS = {}           # { guild_id: { user_id: set(reasons) } }
+GUILD_INVITES_CACHE = {}        # { guild_id: { code: uses } }
+LOCKDOWN_STATE = {}             # { guild_id: bool }
 
 
 def get_invite_store(guild_id):
@@ -1488,35 +1491,64 @@ def mark_suspicious_user(guild, user_id, reason):
     SUSPICIOUS_USERS.setdefault(guild_id, {}).setdefault(user_id, set()).add(reason)
 
 
+async def emergency_quarantine_actor(guild, actor):
+    """If banning fails (due to role hierarchy or API error), strip manageable roles & apply 28-day timeout."""
+    if not guild or not actor:
+        return
+    try:
+        member = guild.get_member(actor.id) if hasattr(actor, "id") else None
+        if member and guild.me.guild_permissions.manage_roles:
+            safe_roles = [r for r in member.roles if r.is_default() or r.position >= guild.me.top_role.position or not r.is_assignable()]
+            if len(safe_roles) < len(member.roles):
+                try:
+                    await member.edit(roles=safe_roles, reason="[Anti-Nuke] Emergency quarantine role stripping")
+                except Exception:
+                    pass
+        if member and guild.me.guild_permissions.moderate_members:
+            try:
+                await member.timeout(timedelta(days=28), reason="[Anti-Nuke] Emergency quarantine")
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"⚠️ Emergency quarantine failed: {exc}")
+
+
 async def ban_user_for_moderation(guild, user, reason):
-    if user is None or user.bot or user.id == bot.user.id:
+    if user is None:
         return False
-    if user.id == guild.owner_id:
+    if user.id == bot.user.id or user.id == guild.owner_id:
         return False
     settings = get_guild_moderation_settings(guild)
     # Whitelist check
     if str(user.id) in {str(x) for x in settings.get("whitelist", [])}:
         return False
-    # Role position check: do not attempt to ban users whose top role is >= bot's top role
+
+    member = guild.get_member(user.id) if hasattr(guild, "get_member") else user
+
+    # Role position check: If member top role >= bot top role, attempt quarantine
     try:
-        if hasattr(user, "top_role") and hasattr(guild.me, "top_role"):
-            if getattr(user.top_role, "position", 0) >= getattr(guild.me.top_role, "position", 0):
+        if member and hasattr(member, "top_role") and hasattr(guild.me, "top_role"):
+            if getattr(member.top_role, "position", 0) >= getattr(guild.me.top_role, "position", 0):
+                await emergency_quarantine_actor(guild, member)
                 return False
     except Exception:
-        # If we can't determine roles, continue but rely on permissions to prevent failures
         pass
+
     if not guild.me.guild_permissions.ban_members:
+        await emergency_quarantine_actor(guild, user)
         return False
+
     try:
-        await guild.ban(user, reason=reason)
+        await guild.ban(user, reason=reason, delete_message_days=1)
+        mark_suspicious_user(guild, user.id, reason)
+        try:
+            await log_moderation_action(guild, f"🛡️ **Auto-Ban:** Banned `{user}` ({user.id}) — {reason}")
+        except Exception:
+            pass
+        return True
     except (discord.Forbidden, discord.HTTPException):
+        await emergency_quarantine_actor(guild, user)
         return False
-    mark_suspicious_user(guild, user.id, reason)
-    try:
-        await log_moderation_action(guild, f"Banned {user} — {reason}")
-    except Exception:
-        pass
-    return True
 
 
 async def log_moderation_action(guild, text):
@@ -1536,7 +1568,7 @@ async def log_moderation_action(guild, text):
             return False
         if not destination.permissions_for(guild.me).send_messages:
             return False
-        await destination.send(f"[Moderation] {text}")
+        await destination.send(f"[🛡️ Moderation] {text}")
         return True
     except Exception:
         return False
@@ -1569,7 +1601,6 @@ def is_category_disabled(guild, category: str):
     store = _disabled_store()
     gid = "global" if guild is None else str(guild.id)
     disabled = set(store.get(gid, []))
-    # If overall socials disabled, treat specific socials as disabled
     if "socials" in disabled and cat in {"instagram", "facebook"}:
         return True
     return cat in disabled
@@ -1596,76 +1627,219 @@ def enable_category(guild, category: str):
     save_data(DATA)
 
 
+# Anti-Spam URL Patterns (Phishing, Nitro scams, Steam scams, unauthorized Discord invites)
+DISCORD_INVITE_PATTERN = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:discord\.(?:gg|io|me|li)|discord(?:app)?\.com/invite)/[a-zA-Z0-9_-]+",
+    re.IGNORECASE
+)
+SCAM_PHISHING_PATTERN = re.compile(
+    r"(?:https?://)?(?:[a-zA-Z0-9_-]+\.)*(?:steamcommunit[yu]\.[a-zA-Z0-9_.-]+|discord-nitro\.[a-zA-Z0-9_.-]+|dlscord\.[a-zA-Z0-9_.-]+|discorcd\.[a-zA-Z0-9_.-]+|free-nitro\.[a-zA-Z0-9_.-]+|nitro-airdrop\.[a-zA-Z0-9_.-]+|steam-gift\.[a-zA-Z0-9_.-]+|gift-discord\.[a-zA-Z0-9_.-]+|claim-nitro\.[a-zA-Z0-9_.-]+|discordapp\.gift\.[a-zA-Z0-9_.-]+)",
+    re.IGNORECASE
+)
+
+
 def is_recent_spam_message(message, now):
     guild_id = str(message.guild.id)
-    history = SPAM_TRACKER.setdefault(guild_id, {}).setdefault(message.author.id, deque(maxlen=8))
-    history.append((now, (message.content or "").strip()))
-    recent = [content for timestamp, content in history if timestamp >= now - 12]
-    if len(recent) < 4:
-        return False
-    if len(set(recent)) <= 2:
-        return True
-    counts = {}
-    for content in recent:
-        counts[content] = counts.get(content, 0) + 1
-        if counts[content] >= 3:
-            return True
-    return len(recent) >= 6
+    user_id = str(message.author.id)
+    history = SPAM_TRACKER.setdefault(guild_id, {}).setdefault(user_id, deque(maxlen=12))
+    content_clean = (message.content or "").strip()
+    history.append((now, content_clean))
+
+    # Check 1: 4+ messages in < 2.5 seconds (high-speed flooding)
+    recent_2_5s = [c for t, c in history if t >= now - 2.5]
+    if len(recent_2_5s) >= 4:
+        return "flood_rate"
+
+    # Check 2: 6+ messages in < 5 seconds
+    recent_5s = [c for t, c in history if t >= now - 5.0]
+    if len(recent_5s) >= 6:
+        return "flood_rate"
+
+    # Check 3: Repeated identical messages (2+ in 4s or 3+ in 10s)
+    recent_10s = [c for t, c in history if t >= now - 10.0 and len(c) > 3]
+    if len(recent_10s) >= 3 and len(set(recent_10s)) == 1:
+        return "duplicate_spam"
+    recent_4s = [c for t, c in history if t >= now - 4.0 and len(c) > 3]
+    if len(recent_4s) >= 2 and len(set(recent_4s)) == 1:
+        return "duplicate_spam"
+
+    return None
 
 
 async def handle_antispam_message(message):
     if message.guild is None or message.author.bot:
         return False
+    if message.author.id == message.guild.owner_id or message.author.id == bot.user.id:
+        return False
+    if message.author.guild_permissions.administrator:
+        return False
     if booster_utils.is_server_booster(message.author, get_user(message.author.id), guild=message.guild):
         return False
+
     settings = get_guild_moderation_settings(message.guild)
     if not settings.get("antispam", False):
         return False
     if message_looks_like_command(message):
         return False
-    if not message.content or not message.content.strip():
+
+    raw_content = message.content or ""
+    if not raw_content.strip() and not message.attachments:
         return False
-    if is_recent_spam_message(message, time.time()):
+
+    now = time.time()
+    guild = message.guild
+    author = message.author
+
+    # Cache recent messages for bulk cleanup
+    m_cache = SPAM_MESSAGES_CACHE.setdefault(str(guild.id), {}).setdefault(str(author.id), deque(maxlen=15))
+    m_cache.append(message)
+
+    # 1. PHISHING & MALICIOUS NITRO / STEAM SCAM LINK FILTER
+    if SCAM_PHISHING_PATTERN.search(raw_content):
         try:
             await message.delete()
         except discord.HTTPException:
             pass
-        mark_suspicious_user(message.guild, message.author.id, "spam")
+        mark_suspicious_user(guild, author.id, "phishing_scam")
+        await ban_user_for_moderation(guild, author, "[Anti-Spam] Phishing / Malicious Scam Link Detected")
         try:
-            await message.channel.send(
-                f"🚫 {message.author.mention}, spam is not allowed. Your message was removed."
+            embed = discord.Embed(
+                title="🛡️ [ANTI-SPAM] Phishing Scam Link Blocked",
+                description=f"🚨 **{author.mention} was banned** for posting known phishing/scam links.",
+                color=discord.Color.red()
             )
-        except discord.HTTPException:
-            pass
-        try:
-            if await ban_user_for_moderation(message.guild, message.author, "Anti-spam protection"):
-                await message.channel.send(
-                    f"🚨 {message.author.mention} has been banned for spam under anti-spam protection."
-                )
-        except Exception:
-            pass
-        try:
-            await log_moderation_action(message.guild, f"Deleted spam message from {message.author} in #{message.channel.name}: {message.content}")
+            await message.channel.send(embed=embed)
         except Exception:
             pass
         return True
+
+    # 2. DISCORD INVITE LINK ADVERTISEMENT FILTER
+    if DISCORD_INVITE_PATTERN.search(raw_content):
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        mark_suspicious_user(guild, author.id, "invite_link_spam")
+        try:
+            if guild.me.guild_permissions.moderate_members:
+                await author.timeout(timedelta(minutes=15), reason="[Anti-Spam] Unauthorized Discord Invite Link")
+        except Exception:
+            pass
+        try:
+            await message.channel.send(f"🚫 {author.mention}, **Discord invite links are not allowed here!** Message removed.", delete_after=8)
+        except Exception:
+            pass
+        await log_moderation_action(guild, f"Deleted invite link from `{author}` in #{message.channel.name}")
+        return True
+
+    # 3. MASS MENTION / GHOST PING ATTACK FILTER
+    total_mentions = len(message.mentions) + len(message.role_mentions) + (5 if message.mention_everyone else 0)
+    if total_mentions >= 4:
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        mark_suspicious_user(guild, author.id, "mass_mention")
+        try:
+            if guild.me.guild_permissions.moderate_members:
+                await author.timeout(timedelta(hours=1), reason="[Anti-Spam] Mass Mention / Ghost Ping Flood")
+        except Exception:
+            pass
+        try:
+            await message.channel.send(f"🚨 {author.mention} was timed out for **mass mention / ghost ping flood**.", delete_after=10)
+        except Exception:
+            pass
+        await log_moderation_action(guild, f"Mass mention violation ({total_mentions} mentions) by `{author}` in #{message.channel.name}")
+        return True
+
+    # 4. ZALGO & EXCESSIVE NEWLINE CRASH TEXT FILTER
+    newline_count = raw_content.count("\n")
+    combining_count = len(re.findall(r"[\u0300-\u036f\u0483-\u0489\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]", raw_content))
+    if newline_count > 12 or combining_count > 80:
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        mark_suspicious_user(guild, author.id, "zalgo_crash_spam")
+        try:
+            await message.channel.send(f"⚠️ {author.mention}, crash/lag text is prohibited. Message deleted.", delete_after=6)
+        except Exception:
+            pass
+        return True
+
+    # 5. FLOOD & DUPLICATE RATE-LIMITING
+    spam_type = is_recent_spam_message(message, now)
+    if spam_type:
+        # Delete recent messages from spammer in channel
+        for msg in list(m_cache):
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        m_cache.clear()
+
+        mark_suspicious_user(guild, author.id, spam_type)
+
+        # Apply timeout or ban
+        if spam_type == "flood_rate":
+            try:
+                if guild.me.guild_permissions.moderate_members:
+                    await author.timeout(timedelta(minutes=30), reason="[Anti-Spam] Rapid Message Flood")
+            except Exception:
+                pass
+            try:
+                await message.channel.send(
+                    f"🚫 {author.mention}, you are sending messages too fast! You have been timed out for 30 minutes.",
+                    delete_after=10
+                )
+            except discord.HTTPException:
+                pass
+        else:
+            try:
+                if guild.me.guild_permissions.moderate_members:
+                    await author.timeout(timedelta(minutes=10), reason="[Anti-Spam] Repeated Duplicate Spam")
+            except Exception:
+                pass
+            try:
+                await message.channel.send(
+                    f"🚫 {author.mention}, repeated spam is not permitted here.",
+                    delete_after=8
+                )
+            except discord.HTTPException:
+                pass
+
+        await log_moderation_action(guild, f"Deleted spam messages from `{author}` in #{message.channel.name} ({spam_type})")
+        return True
+
     return False
 
 
 BULLYING_PATTERNS = [
-    r"\b(kill\s+your\s*self|kys|k\s*y\s*s)\b",
-    r"\b(go\s+die|hope\s+you\s+die|wish\s+you\s+were\s+dead)\b",
-    r"\b(nobody\s+likes\s+you|everyone\s+hates\s+you|you\s+are\s+worthless)\b",
-    r"\b(kill\s+urself|go\s+hang\s+yourself|slash\s+your\s+wrists)\b",
-    r"\b(retard|faggot|nigger|nigga|cunt|chink|spic)\b",
-    r"\b(delete\s+your\s+life|end\s+your\s+life|die\s+in\s+a\s+fire)\b",
-    r"\b(ugly\s+bitch|die\s+bitch|fat\s+ugly|ugly\s+slut)\b",
-    r"\b(drink\s+bleach|hang\s+yourself|jump\ off\ a\ bridge)\b",
+    # Suicide & Self-Harm Encouragement
+    r"\b(kill\s+your\s*self|kys|k\s*y\s*s|k\.y\.s)\b",
+    r"\b(go\s+die|hope\s+you\s+die|wish\s+you\s+were\s+dead|die\s+already)\b",
+    r"\b(kill\s+urself|go\s+hang\s+yourself|slash\s+your\s+wrists|slit\s+your\s+wrists)\b",
+    r"\b(drink\s+bleach|hang\s+yourself|jump\s+off\s+(?:a\s+)?bridge|end\s+your\s+life|delete\s+your\s+life)\b",
+    r"\b(nobody\s+likes\s+you|everyone\s+hates\s+you|you\s+are\s+worthless|waste\s+of\s+oxygen)\b",
+
+    # Severe Hate Speech & Slurs
+    r"\b(nigger|nigga|faggot|retard|chink|spic|kike|tranny|dyke|gook)\b",
+    r"\b(n\s*i\s*g\s*g\s*e\s*r|f\s*a\s*g\s*g\s*o\s*t|r\s*e\s*t\s*a\s*r\s*d)\b",
+
+    # Severe Harassment & Toxicity
+    r"\b(ugly\s+bitch|die\s+bitch|fat\s+ugly|ugly\s+slut|kill\s+your\s+family)\b",
+    r"\b(get\s+cancer|hope\s+you\s+get\s+cancer|burn\s+in\s+hell)\b",
+
+    # Doxxing & IRL Violence Threats
+    r"\b(drop\s+your\s+(?:dox|ip|address)|swat\s+(?:you|ur\s+house)|leak\s+your\s+(?:ip|address|coords))\b",
+    r"\b(i\s+will\s+find\s+where\s+you\s+live|i\s+know\s+your\s+address|send\s+hitman)\b",
 ]
 
 
 async def handle_antibullying_message(message):
     if message.guild is None or message.author.bot:
+        return False
+    if message.author.id == message.guild.owner_id or message.author.id == bot.user.id:
         return False
     settings = get_guild_moderation_settings(message.guild)
     if not settings.get("antibullying", False):
@@ -1678,16 +1852,16 @@ async def handle_antibullying_message(message):
 
     # Check against severe bullying / harassment / hate speech patterns
     detected = False
-    matched_reason = "Bullying / Toxicity violation"
+    matched_reason = "Severe Toxicity & Harassment"
 
     for pattern in BULLYING_PATTERNS:
         if re.search(pattern, content, re.IGNORECASE):
             detected = True
-            matched_reason = "Verified severe bullying, harassment, or hate speech"
+            matched_reason = "Severe harassment, hate speech, or threat violation"
             break
 
     if detected:
-        # Delete the toxic message immediately
+        # 1. Delete toxic message immediately (< 0.1s)
         try:
             await message.delete()
         except discord.HTTPException:
@@ -1695,35 +1869,51 @@ async def handle_antibullying_message(message):
 
         mark_suspicious_user(message.guild, message.author.id, "bullying")
 
-        # Warn in channel
-        try:
-            await message.channel.send(
-                f"🛡️ 🚨 **Anti-Bullying System Triggered!**\n"
-                f"{message.author.mention} was verified engaging in harmful, toxic, or bullying behavior.\n"
-                f"The message was deleted and the user is being banned from the server!"
-            )
-        except discord.HTTPException:
-            pass
+        action_mode = settings.get("antibullying_action", "ban")
+        action_text = "banned from the server"
 
-        # Ban offending user
-        banned = False
-        try:
-            banned = await ban_user_for_moderation(message.guild, message.author, f"Anti-Bullying Protection: {matched_reason}")
-        except Exception:
-            pass
-
-        if not banned:
+        # 2. Punish offender based on configured action
+        if action_mode == "ban":
+            banned = await ban_user_for_moderation(message.guild, message.author, f"[Anti-Bullying Protection] {matched_reason}")
+            if not banned:
+                await emergency_quarantine_actor(message.guild, message.author)
+                action_text = "quarantined & timed out"
+        elif action_mode == "kick":
             try:
                 if message.guild.me.guild_permissions.kick_members:
-                    await message.guild.kick(message.author, reason=f"Anti-Bullying Protection: {matched_reason}")
+                    await message.guild.kick(message.author, reason=f"[Anti-Bullying] {matched_reason}")
+                    action_text = "kicked from the server"
+            except Exception:
+                await emergency_quarantine_actor(message.guild, message.author)
+        else:
+            # Timeout
+            try:
+                if message.guild.me.guild_permissions.moderate_members:
+                    await message.author.timeout(timedelta(hours=24), reason=f"[Anti-Bullying] {matched_reason}")
+                    action_text = "timed out for 24 hours"
             except Exception:
                 pass
 
-        # Log action to modlog
+        # 3. Post authoritative warning embed
+        try:
+            embed = discord.Embed(
+                title="🛡️ [ANTI-BULLYING SHIELD] HARMFUL CONTENT BLOCKED",
+                description=f"⚠️ **Zero-Tolerance Anti-Bullying Triggered!**\n\n"
+                            f"👤 **Offender:** {message.author.mention} (`{message.author.name}`)\n"
+                            f"🛑 **Violation:** Toxic slurs / harassment / self-harm incitement.\n"
+                            f"⚡ **Action Taken:** Message deleted and user **{action_text}**.",
+                color=discord.Color.dark_red()
+            )
+            embed.set_footer(text="Anti-Bullying Active • Safe Community Shield")
+            await message.channel.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+        # 4. Log to modlog
         try:
             await log_moderation_action(
                 message.guild,
-                f"🛡️ **Anti-Bullying Action:** Deleted toxic message from {message.author} ({message.author.id}) in #{message.channel.name}.\nContent: `{message.content}`\nStatus: User banned."
+                f"🛡️ **Anti-Bullying Action:** Deleted toxic message from `{message.author}` ({message.author.id}) in #{message.channel.name}.\nReason: {matched_reason}"
             )
         except Exception:
             pass
@@ -1737,22 +1927,22 @@ async def toggle_moderation_option(ctx, option, label, action):
     if ctx.guild is None:
         return await ctx.send(f"{label} can only be managed inside a server.")
     if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
-        return await ctx.send("Owner only.")
+        return await ctx.send("❌ **Server Owner Only.**")
 
     settings = get_guild_moderation_settings(ctx.guild)
     normalized = (action or "status").casefold()
     if normalized in {"status", ""}:
         status = "ON" if settings.get(option) else "OFF"
-        return await ctx.send(f"{label} is currently **{status}**.")
+        return await ctx.send(f"🛡️ **{label}** is currently **{status}**.")
     if normalized in {"on", "enable", "true"}:
         settings[option] = True
     elif normalized in {"off", "disable", "false"}:
         settings[option] = False
     else:
-        return await ctx.send(f"Use `uwu {option} on` or `uwu {option} off`.")
+        return await ctx.send(f"ℹ️ Usage: `uwu {option} on` or `uwu {option} off`.")
     save_guild_moderation_settings(ctx.guild)
     status = "ON" if settings.get(option) else "OFF"
-    return await ctx.send(f"{label} is now **{status}**.")
+    return await ctx.send(f"✅ **{label}** protection is now **{status}**!")
 
 
 def build_suspicious_user_ids(guild):
@@ -1764,50 +1954,76 @@ def build_suspicious_user_names(guild):
     return [str(guild.get_member(user_id) or user_id) for user_id in user_ids]
 
 
-async def ban_actor_from_audit_log(guild, action, target_id, description):
+async def check_and_ban_nuke_actor(guild, action_type, description, target_id=None):
+    """High-speed zero-latency audit log inspection and instant neutralization of nukers."""
+    if not guild or not guild.me:
+        return
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke", False):
         return
-    if not guild.me.guild_permissions.ban_members or not guild.me.guild_permissions.view_audit_log:
+    if not guild.me.guild_permissions.view_audit_log:
         return
+
     try:
-        async for entry in guild.audit_logs(action=action, limit=5):
-            if getattr(entry.target, "id", None) != target_id:
-                continue
+        whitelist = {str(x) for x in settings.get("whitelist", [])}
+        whitelist.add(str(guild.owner_id))
+        whitelist.add(str(bot.user.id))
+
+        async for entry in guild.audit_logs(action=action_type, limit=5):
+            # Target check or recency check (< 5 seconds)
+            if target_id is not None and getattr(entry.target, "id", None) != target_id:
+                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() > 5:
+                    continue
+
             actor = entry.user
-            if actor is None:
+            if actor is None or str(actor.id) in whitelist:
                 continue
-            if actor.id in {guild.owner_id, bot.user.id}:
-                return
-            if str(actor.id) in {str(x) for x in get_guild_moderation_settings(guild).get("whitelist", [])}:
-                return
-            # Try banning the actor with a few retries in case of transient errors
-            for attempt in range(1, 4):
-                try:
-                    banned = await ban_user_for_moderation(guild, actor, description)
-                    if banned:
-                        try:
-                            await log_moderation_action(guild, f"Anti-nuke: banned {actor} after {description}")
-                        except Exception:
-                            pass
-                        destination = guild.system_channel
-                        if destination is not None:
-                            try:
-                                await destination.send(
-                                    f"🚨 Anti-nuke: banned {actor.mention} after {description}."
-                                )
-                            except discord.HTTPException:
-                                pass
+
+            now_ts = time.time()
+            u_actions = NUKE_ACTION_TRACKER.setdefault(str(guild.id), {}).setdefault(str(actor.id), deque(maxlen=20))
+            u_actions.append((now_ts, description))
+
+            # 1. Instant Ban
+            banned = await ban_user_for_moderation(guild, actor, f"[Anti-Nuke Protection] {description}")
+            if not banned:
+                await emergency_quarantine_actor(guild, actor)
+
+            # 2. Alert in channel
+            dest = guild.system_channel
+            if dest is None or not dest.permissions_for(guild.me).send_messages:
+                for ch in guild.text_channels:
+                    if ch.permissions_for(guild.me).send_messages:
+                        dest = ch
                         break
+
+            if dest:
+                try:
+                    embed = discord.Embed(
+                        title="🚨 [CRITICAL] ANTI-NUKE TRIGGERED!",
+                        description=f"⚠️ **Server Attack Detected & Neutralized!**\n\n"
+                                    f"👤 **Attacker:** {actor.mention} (`{actor.name}` - ID: `{actor.id}`)\n"
+                                    f"🛑 **Action:** `{description}`\n"
+                                    f"⚡ **Outcome:** Offender Banned & Admin Permissions Stripped!\n"
+                                    f"🔒 Server protected by **UwU Bot Anti-Nuke Shield**.",
+                        color=discord.Color.red()
+                    )
+                    embed.set_thumbnail(url=str(actor.display_avatar.url) if hasattr(actor, "display_avatar") else "")
+                    embed.set_footer(text="Anti-Nuke Engine • Ultra-Speed Protection")
+                    await dest.send(embed=embed)
                 except Exception:
-                    # transient failure — wait a bit and retry
-                    try:
-                        await asyncio.sleep(1)
-                    except Exception:
-                        pass
+                    pass
+
+            await log_moderation_action(guild, f"🚨 **Anti-Nuke Action:** Banned `{actor}` ({actor.id}) after `{description}`.")
             return
     except discord.Forbidden:
         return
+    except Exception as exc:
+        print(f"⚠️ Anti-nuke error for {description}: {exc}")
+
+
+async def ban_actor_from_audit_log(guild, action, target_id, description):
+    """Backward-compatible wrapper for check_and_ban_nuke_actor."""
+    await check_and_ban_nuke_actor(guild, action, description, target_id=target_id)
 
 
 def delete_suspicious_messages(guild, user_ids, limit_per_channel=100):
@@ -1838,9 +2054,7 @@ def is_spam_history_message(message):
     if message.guild is None or message.author.bot or not message.content:
         return False
     now = time.time()
-    history = SPAM_TRACKER.setdefault(str(message.guild.id), {}).setdefault(message.author.id, deque(maxlen=8))
-    history.append((now, (message.content or "").strip()))
-    return is_recent_spam_message(message, now)
+    return is_recent_spam_message(message, now) is not None
 
 
 def get_recent_raid_suspects(guild):
@@ -1864,123 +2078,25 @@ def get_moderation_status_text(guild):
     return (
         f"Anti-nuke: {'ON' if settings.get('antinuke') else 'OFF'}\n"
         f"Anti-spam: {'ON' if settings.get('antispam') else 'OFF'}\n"
-        f"Anti-raid: {'ON' if settings.get('antiraid') else 'OFF'}"
+        f"Anti-raid: {'ON' if settings.get('antiraid') else 'OFF'}\n"
+        f"Anti-bullying: {'ON' if settings.get('antibullying') else 'OFF'}"
     )
-
-
-def _replace_message_cleanup_placeholder(guild):
-    return None
 
 
 def format_suspect_names(guild, ids):
     return [str(guild.get_member(user_id) or user_id) for user_id in ids]
 
 
-def _noop():
-    return None
-
-
-def quote(str_value):
-    return str(str_value)
-
-
-def safe_int(value, default=0):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def is_owner_or_server_owner(ctx):
     return ctx.author.id == ctx.guild.owner_id or is_owner(ctx)
 
 
-def _safe_status(value):
-    return "ON" if value else "OFF"
-
-
-def _hardcode():
-    pass
-
-
-def _no_effect():
-    return False
-
-
-def _build_rollback_report(deleted, banned):
-    return deleted, banned
-
-
-def _placeholder():
-    return None
-
-
-def _unused():
-    return None
-
-
-def _dummy():
-    return False
-
-
-def _helper():
-    return True
-
-
-def _final_helper():
-    return None
-
-
-def _more_helpers():
-    pass
-
-
-def _cleanup():
-    pass
-
-
-def _final_cleanup():
-    pass
-
-
-def _unused_helper():
-    pass
-
-
-def _replacer():
-    pass
-
-
-def _internal():
-    pass
-
-
-def _double_check():
-    return True
-
-
-def _sanity():
-    return True
-
-
-def _last_helper():
-    return None
-
-
-def _final():
-    return None
-
-
-def _ghost():
-    return False
-
-
-# -----------------------------
-# Audit-log hardening events
-# -----------------------------
+# ---------------------------------------------
+# 🛡️ Real-Time Audit-Log Hardening & Nuke Defense
+# ---------------------------------------------
 @bot.event
 async def on_guild_role_update(before: discord.Role, after: discord.Role):
-    """Detect when a role's permissions are escalated and respond if antinuke is enabled."""
+    """Detect when a role's permissions are escalated to admin/nuke perms."""
     guild = after.guild
     settings = get_guild_moderation_settings(guild)
     if not settings.get("antinuke"):
@@ -1992,6 +2108,7 @@ async def on_guild_role_update(before: discord.Role, after: discord.Role):
         "ban_members",
         "manage_roles",
         "manage_guild",
+        "manage_channels",
         "kick_members",
     ]
     added = False
@@ -2001,38 +2118,44 @@ async def on_guild_role_update(before: discord.Role, after: discord.Role):
             break
     if not added:
         return
-    # Find the audit log entry for this role update and take action against the actor
+
     try:
-        async for entry in guild.audit_logs(action=discord.AuditLogAction.role_update, limit=6):
-            if getattr(entry.target, "id", None) != after.id:
-                continue
-            actor = entry.user
-            if actor is None:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.role_update, limit=4):
+                if getattr(entry.target, "id", None) != after.id:
+                    continue
+                actor = entry.user
+                if actor is None or actor.id in {guild.owner_id, bot.user.id}:
+                    return
+                if str(actor.id) in {str(x) for x in settings.get("whitelist", [])}:
+                    return
+
+                # Revert permissions if possible
+                try:
+                    if guild.me.guild_permissions.manage_roles and after < guild.me.top_role:
+                        await after.edit(permissions=old_perms, reason="[Anti-Nuke] Reverted unauthorized permission escalation")
+                except Exception:
+                    pass
+
+                await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Unauthorized Role Permission Escalation")
+                await emergency_quarantine_actor(guild, actor)
                 return
-            if str(actor.id) in {str(x) for x in settings.get("whitelist", [])}:
-                return
-            if actor.id in {guild.owner_id, bot.user.id}:
-                return
-            await ban_user_for_moderation(guild, actor, "role permission escalation")
-            return
     except discord.Forbidden:
         return
 
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Detect server boost events and role permission escalation (antinuke)."""
+    """Detect server boost events and admin role permission escalation (antinuke)."""
     # 1. Real-time Server Boost Event Detection
     was_boosting = getattr(before, "premium_since", None) is not None or any(getattr(r, "is_premium_subscriber", lambda: False)() for r in getattr(before, "roles", []))
     is_boosting = getattr(after, "premium_since", None) is not None or any(getattr(r, "is_premium_subscriber", lambda: False)() for r in getattr(after, "roles", []))
 
     if not was_boosting and is_boosting:
-        # Member just boosted the server!
         user_data = get_user(after.id)
         user_data["wallet"] = user_data.get("wallet", 0) + 5_000_000_000_000
         save_data(DATA)
 
-        # Broadcast congratulatory embed in system channel or first available text channel
         guild = after.guild
         channel = guild.system_channel
         if channel is None or not channel.permissions_for(guild.me).send_messages:
@@ -2064,9 +2187,9 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         return
     guild = after.guild
     settings = get_guild_moderation_settings(guild)
-
     if not settings.get("antinuke"):
         return
+
     added_roles = [r for r in after.roles if r not in before.roles]
     if not added_roles:
         return
@@ -2075,32 +2198,35 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         "ban_members",
         "manage_roles",
         "manage_guild",
+        "manage_channels",
         "kick_members",
     ]
-    escalated = False
-    for role in added_roles:
-        for perm in dangerous:
-            if getattr(role.permissions, perm, False):
-                escalated = True
-                break
-        if escalated:
-            break
+    escalated = any(getattr(role.permissions, perm, False) for role in added_roles for perm in dangerous)
     if not escalated:
         return
-    # Inspect who performed the role change
+
+    # Inspect audit logs for rogue role assignment
     try:
-        async for entry in guild.audit_logs(action=discord.AuditLogAction.member_role_update, limit=8):
-            if getattr(entry.target, "id", None) != after.id:
-                continue
-            actor = entry.user
-            if actor is None:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.member_role_update, limit=6):
+                if getattr(entry.target, "id", None) != after.id:
+                    continue
+                actor = entry.user
+                if actor is None or actor.id in {guild.owner_id, bot.user.id}:
+                    return
+                if str(actor.id) in {str(x) for x in settings.get("whitelist", [])}:
+                    return
+
+                # Remove granted dangerous roles from victim/puppet
+                try:
+                    safe_roles = [r for r in after.roles if r not in added_roles]
+                    await after.edit(roles=safe_roles, reason="[Anti-Nuke] Reverting unauthorized admin role grant")
+                except Exception:
+                    pass
+
+                await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Granted unauthorized admin role to member")
+                await emergency_quarantine_actor(guild, actor)
                 return
-            if str(actor.id) in {str(x) for x in settings.get("whitelist", [])}:
-                return
-            if actor.id in {guild.owner_id, bot.user.id}:
-                return
-            await ban_user_for_moderation(guild, actor, "granted privileged role to member")
-            return
     except discord.Forbidden:
         return
 
@@ -18181,44 +18307,97 @@ async def on_member_join(member):
     if member.guild is None:
         return
 
-    # Track real-time invite
-    inviter, inviter_net, _used_code = await track_member_join_invite(member)
+    guild = member.guild
+    settings = get_guild_moderation_settings(guild)
+    now = time.time()
+    guild_id = str(guild.id)
 
-    settings = get_guild_moderation_settings(member.guild)
+    # 1. ROGUE BOT INJECTION DEFENSE (Anti-Nuke)
+    if member.bot and settings.get("antinuke", False):
+        if guild.me.guild_permissions.view_audit_log:
+            try:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.bot_add, limit=3):
+                    if getattr(entry.target, "id", None) == member.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 8:
+                        inviter = entry.user
+                        whitelist = {str(x) for x in settings.get("whitelist", [])}
+                        whitelist.add(str(guild.owner_id))
+                        whitelist.add(str(bot.user.id))
+                        if inviter and str(inviter.id) not in whitelist:
+                            # Ban rogue bot immediately
+                            try:
+                                await guild.ban(member, reason="[Anti-Nuke] Unauthorized rogue bot addition")
+                            except Exception:
+                                pass
+                            # Ban user who invited the rogue bot
+                            await ban_user_for_moderation(guild, inviter, "[Anti-Nuke] Invited unauthorized bot to server")
+                            await emergency_quarantine_actor(guild, inviter)
+                            await log_moderation_action(guild, f"🚨 **Anti-Nuke:** Deflected rogue bot `{member}` ({member.id}) invited by `{inviter}` ({inviter.id}).")
+                            return
+            except Exception:
+                pass
 
-    # 1. Anti-raid check
+    # 2. ULTRA-SPEED MULTI-VECTOR ANTI-RAID SYSTEM
     banned_by_antiraid = False
     if settings.get("antiraid", False):
-        now = time.time()
-        guild_id = str(member.guild.id)
         joins = RAID_JOIN_TRACKER.setdefault(guild_id, deque())
-        joins.append((now, member.id))
-        while joins and joins[0][0] < now - settings.get("raid_join_window", 120):
+        acc_age_days = 999.0
+        if member.created_at:
+            acc_age_days = (datetime.now(timezone.utc) - member.created_at).total_seconds() / 86400.0
+
+        joins.append((now, member.id, member.bot, acc_age_days))
+        while joins and joins[0][0] < now - settings.get("raid_join_window", 60):
             joins.popleft()
-        if len(joins) >= settings.get("raid_join_threshold", 5):
+
+        # Check burst velocity
+        recent_burst = [j for j in joins if j[0] >= now - 10.0]
+        is_raid_detected = len(recent_burst) >= 3 or len(joins) >= settings.get("raid_join_threshold", 5)
+        is_suspicious_fresh = acc_age_days < 2.0 and len(recent_burst) >= 2
+
+        if is_raid_detected or is_suspicious_fresh:
             banned_members = []
-            for _, user_id in list(joins):
-                suspect = member.guild.get_member(user_id)
-                if suspect is None or suspect.id == member.guild.owner_id:
+            for _, user_id, is_bot, _ in list(joins):
+                suspect = guild.get_member(user_id)
+                if suspect is None or suspect.id == guild.owner_id or suspect.id == bot.user.id:
                     continue
-                if await ban_user_for_moderation(member.guild, suspect, "Anti-raid protection"):
-                    banned_members.append(suspect.mention)
-                    if suspect.id == member.id:
-                        banned_by_antiraid = True
+                if str(suspect.id) in {str(x) for x in settings.get("whitelist", [])}:
+                    continue
+                try:
+                    if await ban_user_for_moderation(guild, suspect, "[Anti-Raid Shield] Raid burst detection"):
+                        banned_members.append(suspect.mention)
+                        if suspect.id == member.id:
+                            banned_by_antiraid = True
+                except Exception:
+                    pass
+
             if banned_members:
-                destination = member.guild.system_channel
-                if destination is not None:
+                dest = guild.system_channel
+                if dest is None or not dest.permissions_for(guild.me).send_messages:
+                    for ch in guild.text_channels:
+                        if ch.permissions_for(guild.me).send_messages:
+                            dest = ch
+                            break
+                if dest:
                     try:
-                        await destination.send(
-                            "🚨 Anti-raid active: banned recent joiners to protect the server."
+                        embed = discord.Embed(
+                            title="🛡️ [ANTI-RAID ACTIVE] RAID ATTACK NEUTRALIZED!",
+                            description=f"🚨 **Anti-Raid Shield Triggered!**\n\n"
+                                        f"⚡ Detected raid wave of **{len(banned_members)}** rapid joiners.\n"
+                                        f"🔨 **Action:** All raider accounts automatically banned.\n"
+                                        f"🔒 Server protected by **UwU Bot Anti-Raid Shield**.",
+                            color=discord.Color.gold()
                         )
-                    except discord.HTTPException:
+                        embed.set_footer(text="Anti-Raid Engine • High Security Mode")
+                        await dest.send(embed=embed)
+                    except Exception:
                         pass
 
     if banned_by_antiraid:
         return
 
-    # 2. Welcome Card
+    # Track real-time invite
+    inviter, inviter_net, _used_code = await track_member_join_invite(member)
+
+    # 3. Welcome Card
     welcome_channel_id = settings.get("welcome_channel")
     if welcome_channel_id:
         channel = member.guild.get_channel(welcome_channel_id)
@@ -18229,7 +18408,7 @@ async def on_member_join(member):
             except discord.HTTPException:
                 pass
 
-    # 3. Dedicated Invite Log Channel (if configured via uwu invites set #channel)
+    # 4. Dedicated Invite Log Channel
     invite_channel_id = settings.get("invite_channel")
     if invite_channel_id:
         inv_channel = member.guild.get_channel(invite_channel_id)
@@ -18247,6 +18426,25 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     await track_member_leave_invite(member)
+    guild = member.guild
+    if not guild or not guild.me:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+
+    # Check for rogue mass-kick attack
+    try:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.kick, limit=3):
+                if getattr(entry.target, "id", None) == member.id and (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+                    actor = entry.user
+                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Rogue Kick Attack")
+                        await emergency_quarantine_actor(guild, actor)
+                        return
+    except discord.Forbidden:
+        pass
 
 
 @bot.event
@@ -18268,22 +18466,168 @@ async def on_invite_delete(invite):
 
 @bot.event
 async def on_guild_channel_delete(channel):
-    await ban_actor_from_audit_log(
+    await check_and_ban_nuke_actor(
         channel.guild,
         discord.AuditLogAction.channel_delete,
-        channel.id,
-        "nuke channel deletion",
+        f"Unauthorized deletion of channel #{channel.name}",
+        target_id=channel.id,
     )
 
 
 @bot.event
+async def on_guild_channel_create(channel):
+    guild = channel.guild
+    if not guild:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+
+    # Check for rogue channel creation nuke
+    try:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.channel_create, limit=3):
+                if getattr(entry.target, "id", None) == channel.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 4:
+                    actor = entry.user
+                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        try:
+                            await channel.delete(reason="[Anti-Nuke] Unauthorized channel creation spam")
+                        except Exception:
+                            pass
+                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Channel Creation Spam / Nuke Attempt")
+                        await emergency_quarantine_actor(guild, actor)
+                        return
+    except Exception:
+        pass
+
+
+@bot.event
 async def on_guild_role_delete(role):
-    await ban_actor_from_audit_log(
+    await check_and_ban_nuke_actor(
         role.guild,
         discord.AuditLogAction.role_delete,
-        role.id,
-        "nuke role deletion",
+        f"Unauthorized deletion of role @{role.name}",
+        target_id=role.id,
     )
+
+
+@bot.event
+async def on_guild_role_create(role):
+    guild = role.guild
+    if not guild:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+
+    try:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.role_create, limit=3):
+                if getattr(entry.target, "id", None) == role.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 4:
+                    actor = entry.user
+                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        try:
+                            await role.delete(reason="[Anti-Nuke] Unauthorized role creation")
+                        except Exception:
+                            pass
+                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Unauthorized Role Creation Spam")
+                        await emergency_quarantine_actor(guild, actor)
+                        return
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_member_ban(guild, user):
+    if not guild:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+    try:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.ban, limit=3):
+                if getattr(entry.target, "id", None) == user.id or (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 4:
+                    actor = entry.user
+                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Mass Ban Nuke Attack")
+                        await emergency_quarantine_actor(guild, actor)
+                        # Revert ban on victim
+                        try:
+                            await guild.unban(user, reason="[Anti-Nuke] Rollback unauthorized rogue ban")
+                        except Exception:
+                            pass
+                        return
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_webhooks_update(channel):
+    guild = channel.guild
+    if not guild:
+        return
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+    try:
+        if guild.me.guild_permissions.view_audit_log:
+            async for entry in guild.audit_logs(action=discord.AuditLogAction.webhook_create, limit=3):
+                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+                    actor = entry.user
+                    if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                        # Delete created webhooks
+                        try:
+                            hooks = await channel.webhooks()
+                            for hook in hooks:
+                                if hook.user and hook.user.id == actor.id:
+                                    await hook.delete(reason="[Anti-Nuke] Unauthorized webhook creation")
+                        except Exception:
+                            pass
+                        await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Webhook Spam / Nuke Attempt")
+                        await emergency_quarantine_actor(guild, actor)
+                        return
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_guild_update(before, after):
+    guild = after
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+    if before.name != after.name or before.icon != after.icon:
+        try:
+            if guild.me.guild_permissions.view_audit_log:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.guild_update, limit=3):
+                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+                        actor = entry.user
+                        if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                            await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Unauthorized Server Vandalism")
+                            await emergency_quarantine_actor(guild, actor)
+                            return
+        except Exception:
+            pass
+
+
+@bot.event
+async def on_guild_emojis_update(guild, before, after):
+    settings = get_guild_moderation_settings(guild)
+    if not settings.get("antinuke", False):
+        return
+    if len(before) > len(after):
+        try:
+            if guild.me.guild_permissions.view_audit_log:
+                async for entry in guild.audit_logs(action=discord.AuditLogAction.emoji_delete, limit=3):
+                    if (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 5:
+                        actor = entry.user
+                        if actor and actor.id not in {guild.owner_id, bot.user.id} and str(actor.id) not in {str(x) for x in settings.get("whitelist", [])}:
+                            await ban_user_for_moderation(guild, actor, "[Anti-Nuke] Mass Emoji Deletion")
+                            await emergency_quarantine_actor(guild, actor)
+                            return
+        except Exception:
+            pass
 
 
 @bot.event
@@ -22607,6 +22951,75 @@ async def antibullying_cmd(ctx, sub_cmd: str = None, action: str = None):
 
     act = action if sub_cmd and sub_cmd.lower() in ["bullying", "bully"] else sub_cmd
     return await toggle_moderation_option(ctx, "antibullying", "Anti-bullying", act)
+
+@bot.command(name="automod", aliases=["allshield", "autoprotect", "allprotection"])
+async def automod_cmd(ctx, action: str = None):
+    """Toggle all server security shields at once (antinuke, antiraid, antispam, antibullying)."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command must be used inside a server.")
+    if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
+        return await ctx.send("❌ **Server Owner Only.**")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    act = (action or "").lower()
+    if act in ["on", "enable", "true", "all"]:
+        settings["antinuke"] = True
+        settings["antispam"] = True
+        settings["antiraid"] = True
+        settings["antibullying"] = True
+        save_guild_moderation_settings(ctx.guild)
+        return await ctx.send("🛡️ ⚡ **ALL PROTECTION SHIELDS ACTIVATED (MAXIMUM SECURITY MODE)!**\n• Anti-Nuke: **ON**\n• Anti-Raid: **ON**\n• Anti-Spam: **ON**\n• Anti-Bullying: **ON**")
+    elif act in ["off", "disable", "false"]:
+        settings["antinuke"] = False
+        settings["antispam"] = False
+        settings["antiraid"] = False
+        settings["antibullying"] = False
+        save_guild_moderation_settings(ctx.guild)
+        return await ctx.send("⚠️ **All protection shields have been deactivated.**")
+    else:
+        status_an = "ON" if settings.get("antinuke") else "OFF"
+        status_ar = "ON" if settings.get("antiraid") else "OFF"
+        status_as = "ON" if settings.get("antispam") else "OFF"
+        status_ab = "ON" if settings.get("antibullying") else "OFF"
+        return await ctx.send(
+            f"🛡️ **Current AutoMod Protection Status:**\n"
+            f"• Anti-Nuke: **{status_an}**\n"
+            f"• Anti-Raid: **{status_ar}**\n"
+            f"• Anti-Spam: **{status_as}**\n"
+            f"• Anti-Bullying: **{status_ab}**\n\n"
+            f"ℹ️ Usage: `uwu automod on` (turns all ON) or `uwu automod off`"
+        )
+
+@bot.command(name="security", aliases=["protection", "modstatus", "shieldstatus"])
+async def security_status_cmd(ctx):
+    """View complete server security status, protection layers, and active safeguards."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command must be used inside a server.")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    wl_count = len(settings.get("whitelist", []))
+    modlog_id = settings.get("modlog_channel")
+    modlog_chan = ctx.guild.get_channel(modlog_id) if modlog_id else None
+
+    embed = discord.Embed(
+        title=f"🛡️ Security & Defense Dashboard — {ctx.guild.name}",
+        description="Comprehensive real-time status of all active security modules.",
+        color=discord.Color.blue()
+    )
+
+    an = "🟢 **ACTIVE (Instant Ban & Quarantine)**" if settings.get("antinuke") else "🔴 **DISABLED**"
+    ar = "🟢 **ACTIVE (Burst Detection Shield)**" if settings.get("antiraid") else "🔴 **DISABLED**"
+    asp = "🟢 **ACTIVE (Phishing / Scam / Flood Filter)**" if settings.get("antispam") else "🔴 **DISABLED**"
+    ab = "🟢 **ACTIVE (Zero-Tolerance Toxicity Filter)**" if settings.get("antibullying") else "🔴 **DISABLED**"
+
+    embed.add_field(name="💣 Anti-Nuke", value=an, inline=False)
+    embed.add_field(name="⚔️ Anti-Raid", value=ar, inline=False)
+    embed.add_field(name="🚫 Anti-Spam & Phishing", value=asp, inline=False)
+    embed.add_field(name="🛡️ Anti-Bullying / Toxicity", value=ab, inline=False)
+    embed.add_field(name="👑 Whitelisted Members", value=f"`{wl_count}` trusted user(s)", inline=True)
+    embed.add_field(name="📋 Modlog Channel", value=modlog_chan.mention if modlog_chan else "*Not set (uses system channel)*", inline=True)
+    embed.set_footer(text="Use 'uwu automod on' to enable all protections at once!")
+    await ctx.send(embed=embed)
 
 @bot.command(name="setwelcome", aliases=["set_welcome", "welcomechannel", "welcomecard"])
 async def setwelcome_cmd(ctx, target: str = None, channel: discord.TextChannel = None):
