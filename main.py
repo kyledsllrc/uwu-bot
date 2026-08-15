@@ -4157,6 +4157,59 @@ async def revokemod_cmd(ctx, target: Union[discord.Member, discord.Role] = None)
 # 💖 AI RANT & EMOTIONAL COMPANION SYSTEM
 # ==============================================
 RANT_USER_COOLDOWN = {}
+RANT_RESPONSE_CACHE = {}  # sha256_key -> {"response": str, "timestamp": float}
+RANT_COOLDOWN_SECONDS = 30.0  # 30-60 sec cooldown per user to stretch free quota & prevent spam
+RANT_CACHE_TTL_SECONDS = 7200.0  # 2 hours cache lifetime for repeated similar rants
+
+def get_rant_user_cooldown_remaining(user_id: int) -> float:
+    """Return remaining cooldown seconds if user is on cooldown, else 0.0."""
+    now_ts = time.time()
+    last_ts = RANT_USER_COOLDOWN.get(user_id, 0.0)
+    elapsed = now_ts - last_ts
+    if elapsed < RANT_COOLDOWN_SECONDS:
+        return max(0.0, RANT_COOLDOWN_SECONDS - elapsed)
+    return 0.0
+
+def record_rant_user_activity(user_id: int):
+    """Mark current timestamp for user cooldown tracking."""
+    RANT_USER_COOLDOWN[user_id] = time.time()
+
+def normalize_rant_cache_key(query: str) -> str:
+    """Generate normalized hash key for matching repeated and similar rants."""
+    q = (query or "").lower().strip()
+    for pfx in ["uwu ", "rant ", "vent ", "confess ", "/rant "]:
+        if q.startswith(pfx):
+            q = q[len(pfx):].strip()
+    # Replace non-alphanumeric with spaces to group punctuation variations
+    q = re.sub(r"[^a-zA-Z0-9\s]", " ", q)
+    tokens = sorted(q.split())
+    clean_str = " ".join(tokens)
+    return hashlib.sha256(clean_str.encode("utf-8")).hexdigest()
+
+def get_cached_rant_reply(query: str) -> str:
+    """Retrieve cached response for repeated similar queries if within TTL."""
+    key = normalize_rant_cache_key(query)
+    if key in RANT_RESPONSE_CACHE:
+        entry = RANT_RESPONSE_CACHE[key]
+        if time.time() - entry.get("timestamp", 0.0) < RANT_CACHE_TTL_SECONDS:
+            return entry.get("response", "")
+        else:
+            RANT_RESPONSE_CACHE.pop(key, None)
+    return ""
+
+def store_cached_rant_reply(query: str, response: str):
+    """Store generated AI response in cache to save tokens on repeated rants."""
+    if not query or not response:
+        return
+    key = normalize_rant_cache_key(query)
+    # Maintain maximum 500 cached entries
+    if len(RANT_RESPONSE_CACHE) > 500:
+        oldest_k = min(RANT_RESPONSE_CACHE.keys(), key=lambda k: RANT_RESPONSE_CACHE[k].get("timestamp", 0.0))
+        RANT_RESPONSE_CACHE.pop(oldest_k, None)
+    RANT_RESPONSE_CACHE[key] = {
+        "response": response,
+        "timestamp": time.time()
+    }
 
 def get_guild_rant_store():
     """Retrieve persistent rant/vent auto-reply settings."""
@@ -4458,6 +4511,16 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
     if insult_match:
         return format_as_discord_header(insult_match)
 
+    clean_query = query.strip()
+    for pfx in ["uwu ", "Uwu ", "UWU ", "/rant ", "rant ", "vent ", "confess "]:
+        if clean_query.startswith(pfx):
+            clean_query = clean_query[len(pfx):].strip()
+
+    # 1. Check Response Cache for repeated similar rants (save quota & tokens)
+    cached_ans = get_cached_rant_reply(clean_query)
+    if cached_ans:
+        return format_as_discord_header(cached_ans)
+
     # Collect all available API keys with built-in active fallback key
     candidate_keys = []
     for env_k in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY", "GEMINI_KEY", "VITE_GEMINI_API_KEY"]:
@@ -4473,23 +4536,20 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
     except Exception:
         pass
 
+    # Tuned UwU Bot System Prompt: authentic, empathetic, street-smart Discord companion personality
     system_prompt = (
-        "You are a real, direct, conversational peer in a Discord server chat replying to a user.\n"
-        "STRICT RULES:\n"
-        "1. ACCURATELY DETECT & ANSWER: Read the user's message/question carefully and give a direct, realistic, and tailored response specifically to what they asked or said.\n"
-        "2. COUNTER-INSULTS: If the user insults or curses at you (e.g. 'tanginamo', 'gago', 'bobo', 'pakyu'), reply with a direct counter-insult (e.g. 'tanginamo din', 'gago ka rin', 'bobo mo rin').\n"
-        "3. ZERO EMOJIS: Never use any emojis or emoticons under any circumstances.\n"
-        "4. BRIEF & STRAIGHT TO THE POINT: Keep your reply to 1 to 2 clear sentences (max 25 to 35 words). No long essays, no lists.\n"
-        "5. LANGUAGE MATCHING: Reply in the exact same language/dialect as the user (natural Tagalog/Taglish for Tagalog, English for English).\n"
-        "6. PLAIN TEXT ONLY: No prefixes like 'Response:' or 'UwU Bot:'."
+        "You are UwU Bot, a witty, direct, authentic, and emotionally intuitive companion in a Discord server.\n"
+        "CORE RULES & PERSONALITY:\n"
+        "1. RANT & INTENT DETECTION: Carefully understand the user's situation, emotion, complaint, question, or problem. Provide a relatable, sharp, realistic, and tailored response specifically addressing what they said.\n"
+        "2. TONE: Street-smart, caring but real, zero toxic positivity, zero robotic AI cliches. Speak like a close tropa or friend.\n"
+        "3. LANGUAGE MATCHING: Match the user's language naturally (Tagalog/Taglish with natural slang if Tagalog, natural English if English).\n"
+        "4. COUNTER-INSULTS: If the user insults or curses at you (e.g. 'tanginamo', 'gago', 'bobo', 'pakyu'), reply with a direct counter-insult (e.g. 'tanginamo din', 'gago ka rin').\n"
+        "5. STRICT LENGTH: Keep replies punchy — 1 to 2 clear sentences (max 25 to 35 words). No essays, no bullet lists.\n"
+        "6. STRICT ZERO EMOJIS: Never use any emojis or emoticons under any circumstances.\n"
+        "7. PLAIN TEXT ONLY: No prefixes like 'Response:' or 'UwU Bot:'."
     )
 
-    clean_query = query.strip()
-    for pfx in ["uwu ", "Uwu ", "UWU ", "/rant "]:
-        if clean_query.startswith(pfx):
-            clean_query = clean_query[len(pfx):].strip()
-
-    # 1. Primary Top-Tier: Groq High-Speed LPU AI Engine
+    # 2. Primary Top-Tier: Groq High-Speed LPU AI Engine
     groq_api_keys = []
     for g_env in ["GROQ_API_KEY", "GROQ_KEY"]:
         gv = os.environ.get(g_env)
@@ -4534,19 +4594,20 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                             if choices and "message" in choices[0] and "content" in choices[0]["message"]:
                                 text_ans = choices[0]["message"]["content"].strip()
                                 if text_ans:
+                                    store_cached_rant_reply(clean_query, text_ans)
                                     return format_as_discord_header(text_ans)
             except Exception:
                 continue
 
-    # 2. Secondary: Google Gemini Multi-Model & Multi-Key rotation
-    models_to_try = [
-        "gemini-flash-lite-latest",
-        "gemini-flash-latest",
-        "gemini-2.0-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-1.5-flash"
+    # 3. Secondary Top-Tier Fallback: Google Gemini Next-Gen Multi-Model & Multi-Key rotation (keeps bot always online)
+    gemini_models_to_try = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-flash-latest"
     ]
-    payload = {
+    gemini_payload = {
         "contents": [
             {
                 "role": "user",
@@ -4568,30 +4629,31 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
         ],
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 100,
+            "maxOutputTokens": 150,
             "topP": 0.9
         }
     }
 
     for key in candidate_keys:
-        for model_name in models_to_try:
+        for model_name in gemini_models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0)) as session:
-                    async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
+                    async with session.post(url, json=gemini_payload, headers={"Content-Type": "application/json"}) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             candidates = data.get("candidates", [])
                             if candidates:
                                 parts = candidates[0].get("content", {}).get("parts", [])
-                                if parts and "text" in parts[0]:
-                                    ans = parts[0]["text"].strip()
-                                    if ans:
-                                        return format_as_discord_header(ans)
+                                text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
+                                ans = "".join(text_parts).strip()
+                                if ans:
+                                    store_cached_rant_reply(clean_query, ans)
+                                    return format_as_discord_header(ans)
             except Exception:
                 continue
 
-    # 2. Secondary: AIMLAPI Engine
+    # 4. Tertiary Fallback: AIMLAPI Engine
     aiml_api_key = os.environ.get("AIMLAPI_KEY") or "d444062c07add1f1a655fd4c0afb0f37"
     if aiml_api_key:
         aiml_models = [
@@ -4625,12 +4687,14 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                             if choices and "message" in choices[0] and "content" in choices[0]["message"]:
                                 text_ans = choices[0]["message"]["content"].strip()
                                 if text_ans:
+                                    store_cached_rant_reply(clean_query, text_ans)
                                     return format_as_discord_header(text_ans)
             except Exception:
                 continue
 
-    # 3. Intelligent Topic-Specific Local Fallback
-    return format_as_discord_header(get_smart_empathetic_fallback(clean_query, author_name))
+    # 5. Intelligent Topic-Specific Local Fallback
+    local_fallback = get_smart_empathetic_fallback(clean_query, author_name)
+    return format_as_discord_header(local_fallback)
 
 
 @bot.command(name="rant", aliases=["vent", "confess", "rantmode", "comfort", "aiadvice", "advice", "psychiatrist", "therapist", "counsel"])
@@ -4691,6 +4755,16 @@ async def rant_cmd(ctx, action: str = None, *, extra: str = None):
             color=discord.Color.magenta()
         )
         return await ctx.send(embed=embed)
+
+    # 30–60 second cooldown per user to stretch free quota & prevent spam
+    cooldown_rem = get_rant_user_cooldown_remaining(ctx.author.id)
+    if cooldown_rem > 0:
+        return await ctx.reply(
+            format_as_discord_header(f"Huminahon ka muna, {ctx.author.display_name}. Wait ka ng {int(cooldown_rem)}s bago mag-rant ulit."),
+            mention_author=True
+        )
+
+    record_rant_user_activity(ctx.author.id)
 
     # Generate and send direct AI comfort reply
     try:
@@ -19566,10 +19640,15 @@ async def on_message(message):
                 if message.guild and is_guild_rant_enabled(message.guild.id):
                     # Check if command is NOT an existing registered bot command
                     if cmd_word not in bot.all_commands:
-                        now_ts = time.time()
-                        last_ts = RANT_USER_COOLDOWN.get(message.author.id, 0)
-                        if now_ts - last_ts >= 3.0 and len(after_pref) >= 2:
-                            RANT_USER_COOLDOWN[message.author.id] = now_ts
+                        if len(after_pref) >= 2:
+                            cooldown_rem = get_rant_user_cooldown_remaining(message.author.id)
+                            if cooldown_rem > 0:
+                                await message.reply(
+                                    format_as_discord_header(f"Huminahon ka muna, {message.author.display_name}. Wait ka ng {int(cooldown_rem)}s bago mag-rant ulit."),
+                                    mention_author=True
+                                )
+                                return
+                            record_rant_user_activity(message.author.id)
                             try:
                                 async with message.channel.typing():
                                     reply_text = await generate_ai_rant_reply(
