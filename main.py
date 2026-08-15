@@ -4473,7 +4473,45 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
             except Exception as exc:
                 continue
 
-    # 2. Local Accurate Fallback if API is unreachable
+    # 2. Secondary: AIMLAPI Engine
+    aiml_api_key = os.environ.get("AIMLAPI_KEY") or "d444062c07add1f1a655fd4c0afb0f37"
+    if aiml_api_key:
+        aiml_models = [
+            "openai/gpt-4o-mini",
+            "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+            "mistralai/Mistral-7B-Instruct-v0.2",
+            "google/gemma-2-9b-it",
+            "qwen/qwen-2.5-7b-instruct"
+        ]
+        for aiml_model in aiml_models:
+            aiml_payload = {
+                "model": aiml_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"User {author_name}: {query}"}
+                ],
+                "max_tokens": 100,
+                "temperature": 0.7
+            }
+            try:
+                headers = {
+                    "Authorization": f"Bearer {aiml_api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (UwU-Bot/1.0)"
+                }
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0)) as session:
+                    async with session.post("https://api.aimlapi.com/v1/chat/completions", json=aiml_payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            choices = data.get("choices", [])
+                            if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+                                text_ans = choices[0]["message"]["content"].strip()
+                                if text_ans:
+                                    return format_as_discord_header(text_ans)
+            except Exception:
+                continue
+
+    # 3. Local Accurate Fallback if API is unreachable
     return format_as_discord_header(get_smart_empathetic_fallback(query, author_name))
 
 
