@@ -1,5 +1,5 @@
 # ==============================================
-# KEEP-ALIVE FOR 24/7 REPLIT HOSTING
+# KEEP-ALIVE FOR 24/7 REPLIT & BOT-HOSTING
 # ==============================================
 from flask import Flask
 import threading
@@ -7,7 +7,10 @@ app = Flask(__name__)
 @app.route('/')
 @app.route('/api')
 @app.route('/api/')
-def keep_alive(): return "UwU Bot is alive & running!", 200
+@app.route('/health')
+@app.route('/ping')
+@app.route('/status')
+def keep_alive(): return "UwU Bot is 24/7 online & running!", 200
 
 # ==============================================
 # BOT SETUP & IMPORTS
@@ -4382,44 +4385,154 @@ async def stop_cmd(ctx):
         await ctx.send("Not connected to a voice channel.")
 
 
+# ==============================================
+# PERSISTENT 24/7 VOICE ENGINE
+# ==============================================
 MODE_247_GUILDS = set()
 
+def get_voice_247_store():
+    """Retrieve persistent 24/7 voice settings."""
+    return DATA.setdefault("voice_247_settings", {})
 
-@bot.command(name='leave')
+def is_guild_247_enabled(guild_id):
+    """Check if 24/7 mode is active for a guild."""
+    store = get_voice_247_store()
+    return str(guild_id) in store and store[str(guild_id)].get("enabled", False)
+
+def save_guild_247_state(guild_id, channel_id=None, enabled=True):
+    """Save 24/7 voice state permanently."""
+    store = get_voice_247_store()
+    gid_str = str(guild_id)
+    if enabled:
+        store[gid_str] = {
+            "channel_id": channel_id,
+            "enabled": True,
+            "updated_at": time.time()
+        }
+        MODE_247_GUILDS.add(guild_id)
+    else:
+        store.pop(gid_str, None)
+        MODE_247_GUILDS.discard(guild_id)
+    save_data(DATA)
+
+async def connect_voice_247(channel):
+    """Connect bot to a 24/7 voice channel with multi-engine fallback (Wavelink + Discord Voice)."""
+    if not channel or not getattr(channel, "guild", None):
+        return None
+    guild = channel.guild
+    try:
+        vc = guild.voice_client
+        if vc and vc.is_connected() and vc.channel and vc.channel.id == channel.id:
+            return vc
+        if vc:
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        # 1. Try Wavelink player
+        try:
+            vc = await channel.connect(cls=wavelink.Player, self_deaf=True)
+            if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
+                vc.autoplay = wavelink.AutoPlay.enabled
+            return vc
+        except Exception:
+            # 2. Fallback to native discord voice
+            vc = await channel.connect(timeout=15.0, reconnect=True, self_deaf=True)
+            return vc
+    except Exception as exc:
+        print(f"⚠️ 24/7 Voice connection exception in {guild.name} ({channel.name}): {exc}")
+        return None
+
+@tasks.loop(seconds=25)
+async def voice_247_watchdog():
+    """Continuous 24/7 background guardian loop keeping the bot connected across all servers."""
+    try:
+        store = get_voice_247_store()
+        for gid_str, info in list(store.items()):
+            if not info.get("enabled"):
+                continue
+            guild = bot.get_guild(int(gid_str))
+            if not guild:
+                continue
+            channel_id = info.get("channel_id")
+            channel = guild.get_channel(channel_id) if channel_id else None
+            if not channel or not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                continue
+
+            vc = guild.voice_client
+            if not vc or not vc.is_connected() or not vc.channel or vc.channel.id != channel.id:
+                try:
+                    await connect_voice_247(channel)
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f"⚠️ voice_247_watchdog loop error: {exc}")
+
+
+@bot.command(name='leave', aliases=['disconnect', 'dc'])
 async def leave_cmd(ctx):
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
     if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
-        return await ctx.send("❌ Only owner can disconnect me.")
-    if ctx.guild.id in MODE_247_GUILDS:
-        MODE_247_GUILDS.remove(ctx.guild.id)
+        return await ctx.send("❌ Only the Server Owner or Bot Owner can disconnect me.")
+    
+    save_guild_247_state(ctx.guild.id, enabled=False)
     vc = ctx.guild.voice_client
     if vc:
-        await vc.disconnect()
-        await ctx.send("👋 Left voice channel.")
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+        await ctx.send("👋 Left voice channel and disabled 24/7 mode for this server.")
     else:
         await ctx.send("I'm not connected to a voice channel.")
 
 
-@bot.command(name='247', aliases=['24/7', '24-7', 'stay'])
-async def mode_247_cmd(ctx):
+@bot.command(name='247', aliases=['24/7', '24-7', 'stay', 'voice247'])
+async def mode_247_cmd(ctx, action: str = None):
+    """Keep the bot in your voice channel 24/7 indefinitely across restarts and drops."""
     if is_category_disabled(ctx.guild, 'music'):
         return await ctx.send("**Music commands are currently disabled.**")
-    guild_id = ctx.guild.id
-    if guild_id in MODE_247_GUILDS:
-        MODE_247_GUILDS.remove(guild_id)
-        await ctx.send("🔴 **24/7 Mode Disabled**: The bot will no longer auto-reconnect when idle or disconnected.")
-    else:
-        MODE_247_GUILDS.add(guild_id)
-        vc = ctx.guild.voice_client
-        if not vc and ctx.author.voice and ctx.author.voice.channel:
-            try:
-                vc = await ctx.author.voice.channel.connect(cls=wavelink.Player)
-                if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
-                    vc.autoplay = wavelink.AutoPlay.enabled
-            except Exception as err:
-                print(f"⚠️ Failed to connect on 24/7 enable: {err}")
-        await ctx.send("🟢 **24/7 Mode Active**: The bot will stay in voice call 24/7 and automatically rejoin if Discord drops or resets the voice connection!")
+    
+    guild = ctx.guild
+    act = (action or "").lower()
+
+    if act in ["off", "disable", "stop"]:
+        save_guild_247_state(guild.id, enabled=False)
+        return await ctx.send("🔴 **24/7 Voice Mode Disabled**: The bot will no longer auto-reconnect in this server.")
+
+    # Toggle or Enable
+    currently_enabled = is_guild_247_enabled(guild.id)
+    if currently_enabled and not act:
+        save_guild_247_state(guild.id, enabled=False)
+        return await ctx.send("🔴 **24/7 Voice Mode Disabled**: The bot will no longer auto-reconnect in this server.")
+
+    # Target channel
+    target_channel = None
+    if ctx.author.voice and ctx.author.voice.channel:
+        target_channel = ctx.author.voice.channel
+    elif guild.voice_client and guild.voice_client.channel:
+        target_channel = guild.voice_client.channel
+    elif guild.voice_channels:
+        target_channel = guild.voice_channels[0]
+
+    if not target_channel:
+        return await ctx.send("❌ **Please join a voice channel first** or specify a channel so I can stay 24/7!")
+
+    save_guild_247_state(guild.id, channel_id=target_channel.id, enabled=True)
+    vc = await connect_voice_247(target_channel)
+
+    embed = discord.Embed(
+        title="🟢 24/7 Voice Mode Activated",
+        description=f"🔊 **Bound Channel:** {target_channel.mention}\n"
+                    f"⚡ **Auto-Reconnect:** Enabled across all bot restarts & network drops\n"
+                    f"🎶 The bot will stay in voice call 24/7 indefinitely!",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="UwU Bot 24/7 Voice Engine • Running 24/7 on hosting")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name='queue')
@@ -4513,13 +4626,18 @@ async def on_voice_state_update(member, before, after):
     if member.id == bot.user.id:
         if before.channel and not after.channel:
             guild_id = member.guild.id
-            if guild_id in MODE_247_GUILDS:
-                await asyncio.sleep(2)
+            if is_guild_247_enabled(guild_id) or guild_id in MODE_247_GUILDS:
+                await asyncio.sleep(1.5)
+                target_channel = before.channel
+                store = get_voice_247_store()
+                cfg_cid = store.get(str(guild_id), {}).get("channel_id")
+                if cfg_cid:
+                    saved_ch = member.guild.get_channel(cfg_cid)
+                    if saved_ch:
+                        target_channel = saved_ch
                 try:
-                    vc = await before.channel.connect(cls=wavelink.Player)
-                    if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
-                        vc.autoplay = wavelink.AutoPlay.enabled
-                    print(f"🔄 Auto-reconnected 24/7 player to {before.channel.name} in {member.guild.name}")
+                    await connect_voice_247(target_channel)
+                    print(f"🔄 Auto-reconnected 24/7 player to {target_channel.name} in {member.guild.name}")
                 except Exception as err:
                     print(f"⚠️ 24/7 Auto-reconnect failed: {err}")
 
@@ -18892,6 +19010,21 @@ async def on_ready():
     if not crypto_market_loop.is_running():
         crypto_market_loop.start()
         print("✅ UNCRYPTO MARKET LOOP ACTIVE")
+    # Initialize 24/7 Voice Watchdog
+    try:
+        store = get_voice_247_store()
+        for gid_str, info in store.items():
+            if info.get("enabled"):
+                try:
+                    MODE_247_GUILDS.add(int(gid_str))
+                except Exception:
+                    pass
+        if not voice_247_watchdog.is_running():
+            voice_247_watchdog.start()
+            print("✅ 24/7 VOICE WATCHDOG LOOP ACTIVE")
+    except Exception as exc:
+        print(f"⚠️ Failed to init 24/7 voice watchdog: {exc}")
+
     for guild in bot.guilds:
         try:
             await fetch_and_cache_guild_invites(guild)
@@ -24909,25 +25042,10 @@ async def nuke_confirm_cmd(ctx, *, scope: str = "server"):
         except Exception:
             pass
 
-    duration = round(time.time() - t0, 2)
-    embed = discord.Embed(
-        title="💥 ⚡ [HIGH-POWER SERVER NUKE COMPLETE]",
-        description=f"🚀 **Full Server Wipe Executed in Record Time!**\n\n"
-                    f"🗑️ **Channels Purged:** `{deleted_channels}` / `{len(channels_to_delete) + 1}`\n"
-                    f"🎭 **Roles Purged:** `{deleted_roles}` / `{len(roles_to_delete)}`\n"
-                    f"😀 **Emojis Purged:** `{deleted_emojis}` / `{len(emojis_to_delete)}`\n"
-                    f"🏷️ **Stickers Purged:** `{deleted_stickers}` / `{len(stickers_to_delete)}`\n"
-                    f"🪝 **Webhooks Purged:** `{del_wh_count}`\n\n"
-                    f"⏱️ **Total Execution Speed:** `{duration}s`\n"
-                    f"👑 **Authorized Operator:** {ctx.author.mention}",
-        color=discord.Color.dark_red()
-    )
-    embed.set_thumbnail(url="https://media.giphy.com/media/HhTXt43zEX8uQ/giphy.gif")
-    embed.set_footer(text="Ultra-High-Power Anti-Nuke Stress Test Suite • UwU Bot")
-
+    # Send clean heading matching user design (no embeds, no tag pings, no clutter)
     target_send_channel = landing_channel or ctx.channel
     try:
-        await target_send_channel.send(embed=embed)
+        await target_send_channel.send("# SERVER GOT NUKE BY DAMON")
     except Exception:
         pass
 
@@ -24947,14 +25065,7 @@ async def nuke_cmd(ctx):
         new_channel = await channel.clone(reason=f"Nuked by {ctx.author}")
         await channel.delete(reason=f"Nuked by {ctx.author}")
         await new_channel.edit(position=pos)
-        embed = discord.Embed(
-            title="💣 Channel Nuked Successfully!",
-            description=f"This channel has been wiped and recreated by {ctx.author.mention}.",
-            color=discord.Color.orange()
-        )
-        embed.set_image(url="https://media.giphy.com/media/HhTXt43zEX8uQ/giphy.gif")
-        embed.set_footer(text="UwU Bot Nuke System")
-        await new_channel.send(embed=embed)
+        await new_channel.send("# SERVER GOT NUKE BY DAMON")
     except Exception as exc:
         await ctx.send(f"⚠️ Failed to nuke channel: {exc}")
 
