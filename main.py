@@ -4177,17 +4177,36 @@ def save_guild_rant_state(guild_id, enabled=True):
     store[gid_str]["updated_at"] = time.time()
     save_data(DATA)
 
-def format_as_discord_header(text: str) -> str:
-    """Format text with `# ` prefix on each line so Discord renders in Header 1 (large bold font)."""
+def remove_emojis(text: str) -> str:
+    """Remove any emoji characters from text."""
     if not text:
         return ""
-    lines = text.strip().split("\n")
+    emoji_pattern = re.compile(
+        "["
+        "\U00010000-\U0010ffff"
+        "\u2600-\u27bf"
+        "\u2300-\u23ff"
+        "\u2b50-\u2b55"
+        "\u200d"
+        "\ufe0f"
+        "]+",
+        flags=re.UNICODE,
+    )
+    cleaned = emoji_pattern.sub(r"", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+def format_as_discord_header(text: str) -> str:
+    """Format text with `# ` prefix on each line without emojis so Discord renders in Header 1 (large bold font)."""
+    if not text:
+        return ""
+    cleaned_text = remove_emojis(text)
+    lines = cleaned_text.strip().split("\n")
     formatted = []
     for line in lines:
         s = line.strip()
         if not s:
-            formatted.append("")
-        elif s.startswith("#"):
+            continue
+        if s.startswith("#"):
             formatted.append(s)
         else:
             formatted.append(f"# {s}")
@@ -4197,83 +4216,58 @@ def format_as_discord_header(text: str) -> str:
     return res
 
 def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> str:
-    """Generate high-quality conversational, multilingual psychiatric & psychological emotional support."""
+    """Generate high-quality, concise, professional emotional support without emojis."""
     q_low = query.lower()
 
-    # 0. Crisis / Self-Harm / Hopelessness detection (Psychological first aid & hotlines)
+    # 0. Crisis / Self-Harm / Hopelessness detection
     if any(k in q_low for k in ["magpakamatay", "suicide", "end my life", "kill myself", "gusto ko na mawala", "ayoko na mabuhay", "mamatay na sana", "self harm", "laslas"]):
         return (
-            f"**{author_name}**, please pause for a moment and take a deep breath. 🤍🫂\n"
-            f"Mahalaga ang buhay mo at hindi ka nag-iisa. Valid ang matinding sakit at bigat na nararamdaman mo ngayon, pero hindi mo kailangang dalhin ito mag-isa. "
-            f"Please know there are people who care and want to support you through this dark moment:\n\n"
-            f"📞 **National Center for Mental Health (NCMH Philippines):** `1553` (Luzon toll-free) or `0917-899-8727` / `0966-351-4518`\n"
-            f"📞 **Hopeline PH:** `(02) 8804-4673` / `0917-558-4673`\n"
-            f"📞 **International Crisis Support:** Text `HOME` to `741741` or call `988` (US/CA)\n\n"
-            f"Please reach out to a trusted loved one or professional. Your story is not over yet, and we are rooting for you. 🤍✨"
+            f"Hindi ka nag-iisa, {author_name}. Mahalaga ang buhay mo. "
+            f"Please reach out sa NCMH Crisis Hotline: 1553 o 0917-899-8727."
         )
 
     # 1. Love / Relationship / Mahirap ba akong mahalin / Unloved / Sapat ba ako
     if any(k in q_low for k in ["mahirap ba akong mahalin", "mahalin", "mahal pa ba", "breakup", "iniwan", "niloko", "third party", "option lang", "sapat ba ako", "kulang ba ako", "unloved", "hard to love", "worth loving"]):
         tagalog_replies = [
-            f"Hindi ka mahirap mahalin, **{author_name}**. 🤍 Minsan, napupunta lang tayo sa mga taong hindi marunong magpahalaga o hindi pa handang magmahal nang totoo. Huwag mong sukatin ang halaga mo base sa pagkukulang ng iba. You deserve a love that makes you feel safe, valued, and chosen every single day. Warm hugs with consent! 🫂✨",
-            f"Hinding-hindi ka mahirap mahalin, **{author_name}**. 🥺 Baka nasa maling tao ka lang na hindi marunong magbasa ng tamang halaga mo. Ang totoong nagmamahal, hindi ka paparamdaman na pabigat ka. Sapat ka, higit pa sa inaakala mo. Tandaan mo 'yan lagi. 🤍",
-            f"Valid ang sakit na nararamdaman mo, pero please huwag mong isipin na may mali sa'yo. Ang magmahal ay hindi dapat parang paligsahan kung saan kailangan mong patunayan ang sarili mo. Deserve mo ang taong pipiliin ka nang kusa at buo. Nandito kami para sa'yo! 🤍",
-            f"Isang gentle reminder mula sa akin, **{author_name}**: Ang worth mo ay hindi nakadepende sa kung paano ka tratuhin ng iba. Kapag hindi ka pinahalagahan, reflection 'yon ng kakayahan nilang magmahal, hindi ng halaga mo bilang tao. You are worthy of genuine, patient, and unconditional love. 🤍✨"
+            f"Hindi ka mahirap mahalin, {author_name}. Ang pagtrato ng maling tao sa'yo ay hindi basehan ng tunay mong halaga.",
+            f"Sapat ka, {author_name}. Hindi mo kailangang patunayan ang sarili mo sa taong hindi marunong magpahalaga.",
+            f"Ang worth mo ay hindi nakadepende sa kung sino ang umalis o nanatili, {author_name}. Deserve mo ang totoong pagpapahalaga."
         ]
         return random.choice(tagalog_replies)
 
     # 2. Exhaustion / Pagod na / Burnout / Suko na / Tired / Giving up
     if any(k in q_low for k in ["pagod na ako", "pagod", "suko na", "ayoko na", "di ko na kaya", "tired", "exhausted", "burnout", "give up", "giving up", "cant do this", "can't do this"]):
         tagalog_replies = [
-            f"Valid lahat ng nararamdaman mo, **{author_name}**. Normal lang mapagod dahil tao ka lang. Pero kung napapagod ka, magpahinga ka lang muna—huwag susuko agad. Huminga ka nang malalim, uminom ng tubig, at bigyan mo ng yakap ang sarili mo. I am so proud of you for holding on this far. Kakayanin natin 'to nang dahan-dahan. 🤍✨",
-            f"Hinga nang malalim, **{author_name}**. 🥺 Minsan sobrang bigat talaga ng mundo, pero hindi mo kailangang ayusin ang lahat sa isang iglap. Isang hakbang sa bawat araw lang. Ang galing mo dahil nakarating ka hanggang dito. Pahinga ka muna, deserve mo 'yon. 🫂",
-            f"Ramdam ko ang pagod mo, **{author_name}**. Huwag kang mag-alala kung mabagal ang usad mo ngayon; ang mahalaga ay humihinga ka pa rin at lumalaban. Proud kami sa'yo. Kung kailangan mo ng makikinig, ilabas mo lang dito. ✨"
+            f"Normal lang mapagod, {author_name}. Magpahinga ka muna at bawiin ang lakas mo; hindi mo kailangang madaliin ang lahat.",
+            f"Valid ang nararamdaman mong pagod, {author_name}. Isang hakbang sa bawat pagkakataon lang, huwag mong pilitin ang sarili mo."
         ]
         return random.choice(tagalog_replies)
 
     # 3. Family / Parents / Home pressure
     if any(k in q_low for k in ["pamilya", "magulang", "family", "parents", "nanay", "tatay", "bahay", "insecure", "pressure"]):
-        return (
-            f"Minsan, ang pinakamabigat na sugat ay nagmumula sa mga taong inaasahan nating poprotekta sa atin, **{author_name}**. 🤍 "
-            f"Valid ang lungkot at bigat na dala mo. Tandaan mo na hindi mo kailangang akuin ang responsibilidad ng buong mundo o ipilit ang sarili mo para lang matanggap. "
-            f"Bumuo ka ng sarili mong safe space at magtiwala sa sarili mong proseso. Yakap nang mahigpit! 🫂✨"
-        )
+        return f"Valid ang nararamdaman mong bigat, {author_name}. Hindi mo responsibilidad na akuin ang lahat ng ekspektasyon sa paligid mo."
 
     # 4. School / Academic / Work stress
     if any(k in q_low for k in ["school", "aral", "grades", "bagsak", "thesis", "trabaho", "work", "boss", "salary", "sweldo"]):
-        return (
-            f"Ang iyong mga marka, trabaho, o academic status ay hindi ang kabuuan ng pagkatao mo, **{author_name}**. 🤍 "
-            f"Ang tagumpay ay hindi karera; bawat isa sa atin ay may kanya-kanyang takdang panahon. "
-            f"Basta't ibinibigay mo ang makakaya mo sa bawat araw, sapat na iyon. Huwag kalimutang huminga at magpahinga. Proud ako sa sipag mo! ✨"
-        )
+        return f"Ang mga marka o estado sa trabaho ay hindi ang kabuuan ng pagkatao mo, {author_name}. Ipagpatuloy mo lang ang kaya mo sa sarili mong bilis."
 
     # 5. Loneliness / Alone / Mag-isa / Walang kaibigan / Sadness
     if any(k in q_low for k in ["mag-isa", "lonely", "alone", "walang kaibigan", "malungkot", "sad", "crying", "umiiyak", "no one cares", "walang may pake"]):
         tagalog_replies = [
-            f"Kahit minsan ramdam mong mag-isa ka sa laban, hindi ka nag-iisa dito, **{author_name}**. 🤍 Mahalaga ka at may puwang ka sa mundong ito. Kapag mabigat ang loob mo, nandito ang server at mga kaibigan mo para pakinggan ka. You matter so much! 🫂",
-            f"Huwag mong isiping walang may pakialam sa'yo, **{author_name}**. 🥺 May mga araw talagang tahimik at parang walang nakakaintindi, pero hindi ibig sabihin noon ay hindi ka mahalaga. Sending you warm virtual hugs! ✨"
+            f"Naiintindihan ko ang nararamdaman mo, {author_name}. May mga panahong tahimik ang paligid, pero hindi ibig sabihin noon ay mag-isa ka na sa lahat.",
+            f"Pansamantala lang ang bigat na ito, {author_name}. Huwag mong isiping walang may pakialam sa'yo."
         ]
         return random.choice(tagalog_replies)
 
     # 6. English queries
     if any(k in q_low for k in ["why is life so hard", "what should i do", "i feel lost", "lost", "anxious", "overthinking", "stress", "worried"]):
-        return (
-            f"It's completely okay to feel lost or overwhelmed right now, **{author_name}**. 🤍 "
-            f"Life doesn't always come with clear directions, and feeling uncertain is a normal part of growing. "
-            f"Take a deep breath, focus on what you can control right in this moment, and be gentle with yourself. "
-            f"You have overcome 100% of your hardest days before, and you will find your way through this too. We're here for you! ✨"
-        )
+        return f"Take things one step at a time, {author_name}. You do not have to solve everything all at once today."
 
-    # 7. General warm comforting fallback
-    return (
-        f"Naiintindihan ko ang nararamdaman mo, **{author_name}**. 🤍 "
-        f"Kahit anong pinagdadaanan mo ngayon, tandaan mong valid ang emosyon mo at may kakayahan kang malagpasan 'to. "
-        f"Huwag mag-atubiling humingi ng tulong o magpahinga kapag mabigat na. "
-        f"Nandito lang ang UwU Bot at ang server para damayan ka! ✨🫂"
-    )
+    # 7. General fallback
+    return f"Naiintindihan kita, {author_name}. Valid ang nararamdaman mo at malalampasan mo rin ito nang dahan-dahan."
 
 async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author_id: int = 0) -> str:
-    """Generate empathetic, language-adaptive psychiatric counseling & psychological advice using Gemini with multi-engine resilience."""
+    """Generate concise, straight-to-the-point, emoji-free psychiatric and conversational peer advice."""
     api_key = (
         os.environ.get("GEMINI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
@@ -4283,25 +4277,15 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
     )
 
     system_prompt = (
-        "You are UwU Bot, a compassionate, emotionally intelligent, and psychologically-grounded AI companion and psychiatric counselor.\n"
-        "A Discord server member is confiding in you with their real-life personal problems, mental struggles, relationship heartbreak, anxiety, family pressure, or asking a vulnerable question (e.g. 'uwu mahirap ba akong mahalin?').\n\n"
-        "CORE PSYCHOLOGICAL & PSYCHIATRIC PRINCIPLES:\n"
-        "1. STRICT LANGUAGE & CULTURAL MATCHING:\n"
-        "   - Reply in the EXACT SAME LANGUAGE and dialect as the user.\n"
-        "   - If Tagalog / Taglish (Filipino), reply in genuine, comforting, warm Filipino/Taglish conversational tone.\n"
-        "   - If English, reply in deeply empathetic, articulate English.\n"
-        "   - If Bisaya / Cebuano, reply in Bisaya.\n"
-        "2. THERAPEUTIC / COUNSELING STRUCTURE:\n"
-        "   - Step 1: Active Listening & Emotional Validation. Acknowledge and normalize their feelings without judgment.\n"
-        "   - Step 2: Gentle Cognitive Reframing (CBT). Offer a healthy, compassionate perspective on their situation or self-worth.\n"
-        "   - Step 3: Actionable Grounding & Warm Comfort. Suggest a small, manageable step (e.g. taking a breath, resting, practicing self-compassion).\n"
-        "3. TONE & BOUNDARIES:\n"
-        "   - Speak like a caring, empathetic, supportive psychologist friend or gentle elder sibling.\n"
-        "   - Never judge, lecture, minimize, invalidate, or give cold bullet points.\n"
-        "   - Keep length between 60 to 140 words (1 to 3 short, easy-to-read paragraphs).\n"
-        "   - Use soft, comforting emojis naturally (e.g. 🤍, 🥺, ✨, 🫂).\n"
-        "4. CRISIS SAFETY:\n"
-        "   - If the user expresses explicit suicidal intent or severe self-harm, provide deep warmth and gently include the Philippine NCMH Crisis Hotline (1553 / 0917-899-8727) and international crisis text lines."
+        "You are a mature, straightforward, and empathetic peer in a Discord chat providing support to users.\n"
+        "A user is asking a direct question, ranting, or sharing a personal struggle.\n\n"
+        "STRICT MANDATORY RULES:\n"
+        "1. STRICTLY ACCURATE & RELEVANT: Directly address the user's specific statement or question with accurate, mature perspective.\n"
+        "2. ABSOLUTELY ZERO EMOJIS: Do NOT use ANY emojis under any circumstances (no hearts, no smiling faces, no symbols).\n"
+        "3. STRAIGHT TO THE POINT & CONCISE: Keep the response short and direct (1 to 2 clear sentences, maximum 25 to 45 words). Do not write essays, long paragraphs, or lists.\n"
+        "4. TONE: Professional yet genuine and conversational, like a real person talking directly to another user. No robotic phrases.\n"
+        "5. LANGUAGE MATCHING: Reply in the EXACT same language and dialect as the user (e.g. Tagalog / Taglish for Tagalog queries, English for English queries, Bisaya for Bisaya queries).\n"
+        "6. FORMAT: Plain text only. Do NOT add prefixes like 'Response:' or 'UwU Bot:'."
     )
 
     # 1. Primary: Gemini API with modern model rotation
@@ -4333,16 +4317,16 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"}
             ],
             "generationConfig": {
-                "temperature": 0.85,
-                "maxOutputTokens": 450,
-                "topP": 0.95
+                "temperature": 0.7,
+                "maxOutputTokens": 150,
+                "topP": 0.9
             }
         }
 
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=9.0)) as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8.0)) as session:
                     async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -4360,12 +4344,12 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
     # 2. Secondary AI Fallback: Public AI Endpoint for guaranteed live answers
     try:
         encoded_prompt = urllib.parse.quote(f"{system_prompt}\n\nUser: {author_name}\nRant/Question: {query}")
-        poll_url = f"https://text.pollinations.ai/{encoded_prompt}?model=openai&temperature=0.8"
+        poll_url = f"https://text.pollinations.ai/{encoded_prompt}?model=openai&temperature=0.7"
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7.0)) as session:
             async with session.get(poll_url) as p_resp:
                 if p_resp.status == 200:
                     text_res = await p_resp.text()
-                    if text_res and len(text_res.strip()) > 20:
+                    if text_res and len(text_res.strip()) > 10:
                         return format_as_discord_header(text_res.strip())
     except Exception as poll_exc:
         print(f"⚠️ Secondary AI provider error: {poll_exc}")
