@@ -4151,7 +4151,223 @@ async def revokemod_cmd(ctx, target: Union[discord.Member, discord.Role] = None)
 
 
 
+
+# ==============================================
+# 💖 AI RANT & EMOTIONAL COMPANION SYSTEM
+# ==============================================
+RANT_USER_COOLDOWN = {}
+
+def get_guild_rant_store():
+    """Retrieve persistent rant/vent auto-reply settings."""
+    return DATA.setdefault("guild_rant_settings", {})
+
+def is_guild_rant_enabled(guild_id):
+    """Check if rant auto-reply mode is active for a guild."""
+    store = get_guild_rant_store()
+    return str(guild_id) in store and store[str(guild_id)].get("enabled", False)
+
+def save_guild_rant_state(guild_id, enabled=True):
+    """Save guild rant auto-reply state permanently."""
+    store = get_guild_rant_store()
+    gid_str = str(guild_id)
+    if gid_str not in store:
+        store[gid_str] = {}
+    store[gid_str]["enabled"] = bool(enabled)
+    store[gid_str]["updated_at"] = time.time()
+    save_data(DATA)
+
+def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> str:
+    """Generate high-quality conversational, multilingual empathetic advice when API is offline."""
+    q_low = query.lower()
+
+    # 1. Love / Relationship / Mahirap ba akong mahalin / Unloved / Sapat ba ako
+    if any(k in q_low for k in ["mahirap ba akong mahalin", "mahalin", "mahal pa ba", "breakup", "iniwan", "niloko", "third party", "option lang", "sapat ba ako", "kulang ba ako", "unloved", "hard to love", "worth loving"]):
+        tagalog_replies = [
+            f"Hindi ka mahirap mahalin, **{author_name}**. 🤍 Minsan, napupunta lang tayo sa mga taong hindi marunong magpahalaga o hindi pa handang magmahal nang totoo. Huwag mong sukatin ang halaga mo base sa pagkukulang ng iba. You deserve a love that makes you feel safe, valued, and chosen every single day. Warm hugs with consent! 🫂✨",
+            f"Hinding-hindi ka mahirap mahalin, **{author_name}**. 🥺 Baka nasa maling tao ka lang na hindi marunong magbasa ng tamang halaga mo. Ang totoong nagmamahal, hindi ka paparamdaman na pabigat ka. Sapat ka, higit pa sa inaakala mo. Tandaan mo 'yan lagi. 🤍",
+            f"Valid ang sakit na nararamdaman mo, pero please huwag mong isipin na may mali sa'yo. Ang magmahal ay hindi dapat parang paligsahan kung saan kailangan mong patunayan ang sarili mo. Deserve mo ang taong pipiliin ka nang kusa at buo. Nandito kami para sa'yo! 🤍"
+        ]
+        return random.choice(tagalog_replies)
+
+    # 2. Exhaustion / Pagod na / Burnout / Suko na / Tired / Giving up
+    if any(k in q_low for k in ["pagod na ako", "pagod", "suko na", "ayoko na", "di ko na kaya", "tired", "exhausted", "burnout", "give up", "giving up", "cant do this", "can't do this"]):
+        tagalog_replies = [
+            f"Valid lahat ng nararamdaman mo, **{author_name}**. Normal lang mapagod dahil tao ka lang. Pero kung napapagod ka, magpahinga ka lang muna—huwag susuko agad. Huminga ka nang malalim, uminom ng tubig, at bigyan mo ng yakap ang sarili mo. I am so proud of you for holding on this far. Kakayanin natin 'to nang dahan-dahan. 🤍✨",
+            f"Hinga nang malalim, **{author_name}**. 🥺 Minsan sobrang bigat talaga ng mundo, pero hindi mo kailangang ayusin ang lahat sa isang iglap. Isang hakbang sa bawat araw lang. Ang galing mo dahil nakarating ka hanggang dito. Pahinga ka muna, deserve mo 'yon. 🫂",
+            f"Ramdam ko ang pagod mo, **{author_name}**. Huwag kang mag-alala kung mabagal ang usad mo ngayon; ang mahalaga ay humihinga ka pa rin at lumalaban. Proud kami sa'yo. Kung kailangan mo ng makikinig, ilabas mo lang dito. ✨"
+        ]
+        return random.choice(tagalog_replies)
+
+    # 3. Loneliness / Alone / Mag-isa / Walang kaibigan / Sadness
+    if any(k in q_low for k in ["mag-isa", "lonely", "alone", "walang kaibigan", "malungkot", "sad", "crying", "umiiyak", "no one cares", "walang may pake"]):
+        tagalog_replies = [
+            f"Kahit minsan ramdam mong mag-isa ka sa laban, hindi ka nag-iisa dito, **{author_name}**. 🤍 Mahalaga ka at may puwang ka sa mundong ito. Kapag mabigat ang loob mo, nandito ang server at mga kaibigan mo para pakinggan ka. You matter so much! 🫂",
+            f"Huwag mong isiping walang may pakialam sa'yo, **{author_name}**. 🥺 May mga araw talagang tahimik at parang walang nakakaintindi, pero hindi ibig sabihin noon ay hindi ka mahalaga. Sending you warm virtual hugs! ✨"
+        ]
+        return random.choice(tagalog_replies)
+
+    # 4. English queries
+    if any(k in q_low for k in ["why is life so hard", "what should i do", "i feel lost", "lost", "anxious", "overthinking", "stress", "worried"]):
+        return (
+            f"It's completely okay to feel lost or overwhelmed right now, **{author_name}**. 🤍 "
+            f"Life doesn't always come with clear directions, and feeling uncertain is a normal part of growing. "
+            f"Take a deep breath, focus on what you can control right in this moment, and be gentle with yourself. "
+            f"You have overcome 100% of your hardest days before, and you will find your way through this too. We're here for you! ✨"
+        )
+
+    # 5. General warm comforting fallback
+    return (
+        f"Naiintindihan ko ang nararamdaman mo, **{author_name}**. 🤍 "
+        f"Kahit anong pinagdadaanan mo ngayon, tandaan mong valid ang emosyon mo at may kakayahan kang malagpasan 'to. "
+        f"Huwag mag-atubiling humingi ng tulong o magpahinga kapag mabigat na. "
+        f"Nandito lang ang UwU Bot at ang server para damayan ka! ✨🫂"
+    )
+
+async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author_id: int = 0) -> str:
+    """Generate empathetic, language-adaptive AI response to user rants/problems using Gemini with fallback."""
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+    system_prompt = (
+        "You are UwU Bot, a deeply empathetic, emotionally intelligent, caring, and comforting Discord bot companion.\n"
+        "A user in a Discord server is sharing a heart-to-heart struggle, personal pain, relationship/love dilemma, life stress, burnout, or asking a vulnerable question (for example: 'uwu mahirap ba akong mahalin?').\n\n"
+        "MANDATORY INSTRUCTIONS:\n"
+        "1. STRICT LANGUAGE MATCHING: You MUST reply in the EXACT SAME LANGUAGE and natural conversational style used by the user:\n"
+        "   - If they write in Tagalog or Taglish (Filipino), reply in genuine, comforting, warm, and natural conversational Tagalog / Taglish.\n"
+        "   - If they write in English, reply in empathetic, warm English.\n"
+        "   - If they write in Bisaya / Cebuano, reply in Bisaya.\n"
+        "   - If in any other language, match that language perfectly.\n"
+        "2. TONE & PERSONA:\n"
+        "   - Speak like a supportive, understanding close friend or gentle, compassionate elder sibling.\n"
+        "   - Validate their emotions genuinely first. Never dismiss them, minimize their struggle, lecture them, or give cold bullet points.\n"
+        "   - Provide gentle perspective, reassurance, and heartfelt encouragement.\n"
+        "   - Keep your reply concise, organic, and readable (1 to 3 short paragraphs, around 50 to 120 words).\n"
+        "   - Add subtle warm touches and soft emojis naturally (e.g. 🤍, 🥺, ✨, 🫂).\n"
+        "3. FORMATTING:\n"
+        "   - Output plain text suitable for a Discord message reply.\n"
+        "   - Do NOT include robot prefixes like 'Response:', 'UwU Bot:', or meta commentary."
+    )
+
+    if api_key:
+        models_to_try = [
+            "gemini-2.5-flash",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro"
+        ]
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": f"User: {author_name}\nQuestion/Rant: {query}"}
+                    ]
+                }
+            ],
+            "system_instruction": {
+                "parts": [
+                    {"text": system_prompt}
+                ]
+            },
+            "generationConfig": {
+                "temperature": 0.85,
+                "maxOutputTokens": 380,
+                "topP": 0.95
+            }
+        }
+
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8.0)) as session:
+                    async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                if parts and "text" in parts[0]:
+                                    ans = parts[0]["text"].strip()
+                                    if ans:
+                                        return ans
+            except Exception as exc:
+                print(f"⚠️ Gemini API attempt ({model_name}) error: {exc}")
+                continue
+
+    return get_smart_empathetic_fallback(query, author_name)
+
+
+@bot.command(name="rant", aliases=["vent", "confess", "rantmode", "comfort", "aiadvice", "advice"])
+async def rant_cmd(ctx, action: str = None, *, extra: str = None):
+    """Toggle AI Rant auto-reply on/off for server, or directly vent a problem to UwU Bot."""
+    if is_category_disabled(ctx.guild, 'social'):
+        return await ctx.send("**Social commands are currently disabled.**")
+
+    guild = ctx.guild
+    act = (action or "").lower()
+
+    # 1. Enable / On
+    if act in ["on", "enable", "start", "true"]:
+        if not is_server_mod_or_owner(ctx):
+            return await ctx.send("❌ Only Server Owner, Administrators, or Moderators can toggle AI Rant mode!")
+        save_guild_rant_state(guild.id, enabled=True)
+        embed = discord.Embed(
+            title="🟢 AI Rant & Vent Auto-Reply: ENABLED",
+            description="Members can now type `uwu <rant or problem>` and UwU Bot will automatically reply with personalized, empathetic AI comfort and advice in their language!\n\n"
+                        "💡 **Examples:**\n"
+                        "• `uwu mahirap ba akong mahalin?`\n"
+                        "• `uwu bat ang sakit kapag iniwan ka?`\n"
+                        "• `uwu I feel so tired and overwhelmed lately...`\n"
+                        "• `uwu rant <message>` or `uwu vent <message>`",
+            color=discord.Color.pink()
+        )
+        embed.set_footer(text="UwU Bot AI Companion • Powered by Google Gemini")
+        return await ctx.send(embed=embed)
+
+    # 2. Disable / Off
+    if act in ["off", "disable", "stop", "false"]:
+        if not is_server_mod_or_owner(ctx):
+            return await ctx.send("❌ Only Server Owner, Administrators, or Moderators can toggle AI Rant mode!")
+        save_guild_rant_state(guild.id, enabled=False)
+        return await ctx.send("🔴 **AI Rant & Vent Auto-Reply Disabled**: The bot will no longer auto-respond to rants in general chat.")
+
+    # 3. Status check
+    if act in ["status", "info", "check"]:
+        enabled = is_guild_rant_enabled(guild.id) if guild else True
+        st = "🟢 **ENABLED**" if enabled else "🔴 **DISABLED**"
+        return await ctx.send(f"💬 **AI Rant Auto-Reply Status for {guild.name if guild else 'Server'}:** {st}\nUse `uwu rant on` or `uwu rant off` to change.")
+
+    # 4. User is venting directly (e.g. `uwu rant <text>` or `uwu vent <text>`)
+    query = ""
+    if action:
+        query = f"{action} {extra}".strip() if extra else action.strip()
+
+    if not query:
+        enabled = is_guild_rant_enabled(guild.id) if guild else True
+        st = "🟢 Active" if enabled else "🔴 Inactive"
+        embed = discord.Embed(
+            title="💖 UwU Bot AI Rant & Emotional Support",
+            description=f"**Current Server Status:** {st}\n\n"
+                        f"**How to use:**\n"
+                        f"• `uwu rant on` / `uwu rant off` — *(Moderators/Owner)* Toggle automatic replies.\n"
+                        f"• `uwu rant <your message>` — Directly share a problem or vent anytime.\n"
+                        f"• When ON, simply type `uwu <rant>` (e.g. `uwu mahirap ba akong mahalin?`).",
+            color=discord.Color.magenta()
+        )
+        return await ctx.send(embed=embed)
+
+    # Generate and send direct AI comfort reply
+    try:
+        async with ctx.typing():
+            reply_text = await generate_ai_rant_reply(query, author_name=ctx.author.display_name, author_id=ctx.author.id)
+            await ctx.reply(reply_text, mention_author=True)
+    except Exception as exc:
+        fallback = get_smart_empathetic_fallback(query, author_name=ctx.author.display_name)
+        await ctx.reply(fallback, mention_author=True)
+
+
+
 async def _music_play_next(ctx, guild_id: str):
+
 
     await play_next_track(guild_id)
 
@@ -19009,6 +19225,26 @@ async def on_message(message):
                         await target_ch.send(final_text)
                         return
 
+                # Check for AI Rant / Vent auto-reply when enabled in the server
+                if message.guild and is_guild_rant_enabled(message.guild.id):
+                    # Check if command is NOT an existing registered bot command
+                    if cmd_word not in bot.all_commands:
+                        now_ts = time.time()
+                        last_ts = RANT_USER_COOLDOWN.get(message.author.id, 0)
+                        if now_ts - last_ts >= 3.0 and len(after_pref) >= 2:
+                            RANT_USER_COOLDOWN[message.author.id] = now_ts
+                            try:
+                                async with message.channel.typing():
+                                    reply_text = await generate_ai_rant_reply(
+                                        after_pref,
+                                        author_name=message.author.display_name,
+                                        author_id=message.author.id
+                                    )
+                                    await message.reply(reply_text, mention_author=True)
+                                return
+                            except Exception as exc:
+                                print(f"⚠️ Error auto-replying to rant: {exc}")
+
     await bot.process_commands(message)
 
 @bot.event
@@ -24210,6 +24446,8 @@ async def help_cmd(ctx, category: str = None):
                 ("kiss", "@user — kiss a user"),
                 ("pat", "@user — pat a user on the head"),
                 ("slap", "@user — slap a user"),
+                ("rant", "[on|off|text] — toggle AI emotional support or vent problem"),
+                ("vent", "<problem> — share a problem to receive AI comfort in your language"),
             ],
         },
         "music": {
