@@ -4195,6 +4195,84 @@ def remove_emojis(text: str) -> str:
     cleaned = emoji_pattern.sub(r"", text)
     return re.sub(r"\s+", " ", cleaned).strip()
 
+def check_bot_insult_reply(query: str, author_name: str = "") -> str:
+    """If user insults the bot, reply with an accurate, direct counter-insult."""
+    if not query:
+        return ""
+    q = query.lower().strip()
+    clean_q = re.sub(r"[^a-zA-Z0-9\s]", " ", q)
+    clean_compact = re.sub(r"\s+", "", clean_q)
+
+    # 1. Tangina / Tanginamo / Putangina
+    if any(k in clean_compact for k in ["tanginamo", "tanginamoo", "tangina", "tanginang", "putangina", "tangna", "pukinangina", "pukingina"]):
+        return "tanginamo din"
+    
+    # 2. Gago / Ogag
+    if any(k in clean_compact for k in ["gago", "gagoka", "gagomo", "ogag", "kagaguhan"]):
+        return "gago ka rin"
+
+    # 3. Bobo
+    if any(k in clean_compact for k in ["bobo", "boboka", "bobomo", "kabobohan"]):
+        return "bobo mo rin"
+
+    # 4. Tanga
+    if any(k in clean_compact for k in ["tanga", "tangaka", "tangamo", "katangahan"]):
+        return "tanga mo rin"
+
+    # 5. Fuck you / Pakyu
+    if any(k in clean_compact for k in ["pakyu", "fuckyou", "fckyou", "fukyou", "fkyou", "fakyu", "fucku", "fcku"]):
+        return "pakyu ka rin"
+
+    # 6. Tarantado
+    if any(k in clean_compact for k in ["tarantado", "tarandato", "tarantadoka"]):
+        return "tarantado ka rin"
+
+    # 7. Ulol
+    if any(k in clean_compact for k in ["ulol", "ulul", "ulolka"]):
+        return "ulol ka rin"
+
+    # 8. Inutil
+    if any(k in clean_compact for k in ["inutil", "inutilka"]):
+        return "inutil ka rin"
+
+    # 9. Kupal
+    if any(k in clean_compact for k in ["kupal", "kupalka", "kupalmo"]):
+        return "kupal mo din"
+
+    # 10. Puta / Pota
+    if any(k in clean_compact for k in ["puta", "pota", "putragis", "punyeta", "letse", "leche"]):
+        return "putangina mo rin"
+
+    # 11. Peste / Piste
+    if any(k in clean_compact for k in ["peste", "piste", "pesteka"]):
+        return "peste ka rin"
+
+    # 12. Bwisit / Bwesit
+    if any(k in clean_compact for k in ["bwisit", "bwesit", "buwisit"]):
+        return "bwisit ka rin"
+
+    # 13. Hayop
+    if any(k in clean_compact for k in ["hayopka", "animal ka", "hayopmo"]):
+        return "hayop ka rin"
+
+    # 14. Shut up / Manahimik ka
+    if any(k in clean_compact for k in ["shutup", "stfu", "manahimikka", "tumahimikka", "shutthefuckup"]):
+        return "ikaw manahimik"
+
+    # 15. Idiot / Stupid / Dumb / Asshole / Bitch
+    if any(k in clean_compact for k in ["idiot", "stupid", "dumbass", "dumbbot", "asshole", "bitch"]):
+        return "idiot ka rin"
+
+    # 16. Pangit / Panget
+    if any(k in clean_compact for k in ["pangit", "panget", "pangitka", "pangetmo"]):
+        return "pangit mo rin"
+
+    # 17. Basura
+    if any(k in clean_compact for k in ["basura", "basurangbot", "basuraka"]):
+        return "basura ka rin"
+
+    return ""
+
 def format_as_discord_header(text: str) -> str:
     """Format text with `# ` prefix on each line without emojis so Discord renders in Header 1 (large bold font)."""
     if not text:
@@ -4217,6 +4295,10 @@ def format_as_discord_header(text: str) -> str:
 
 def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> str:
     """Generate high-quality, concise, professional emotional support without emojis."""
+    insult_match = check_bot_insult_reply(query, author_name)
+    if insult_match:
+        return insult_match
+
     q_low = query.lower()
 
     # 0. Crisis / Self-Harm / Hopelessness detection
@@ -4267,7 +4349,12 @@ def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> st
     return f"Naiintindihan kita, {author_name}. Valid ang nararamdaman mo at malalampasan mo rin ito nang dahan-dahan."
 
 async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author_id: int = 0) -> str:
-    """Generate concise, straight-to-the-point, emoji-free psychiatric and conversational peer advice."""
+    """Generate concise, straight-to-the-point, emoji-free psychiatric and conversational peer advice, with insult counter-responses."""
+    # 0. Immediate direct check for insults / profanity targeted at the bot or user
+    insult_match = check_bot_insult_reply(query, author_name)
+    if insult_match:
+        return format_as_discord_header(insult_match)
+
     api_key = (
         os.environ.get("GEMINI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
@@ -4281,11 +4368,12 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
         "A user is asking a direct question, ranting, or sharing a personal struggle.\n\n"
         "STRICT MANDATORY RULES:\n"
         "1. STRICTLY ACCURATE & RELEVANT: Directly address the user's specific statement or question with accurate, mature perspective.\n"
-        "2. ABSOLUTELY ZERO EMOJIS: Do NOT use ANY emojis under any circumstances (no hearts, no smiling faces, no symbols).\n"
-        "3. STRAIGHT TO THE POINT & CONCISE: Keep the response short and direct (1 to 2 clear sentences, maximum 25 to 45 words). Do not write essays, long paragraphs, or lists.\n"
-        "4. TONE: Professional yet genuine and conversational, like a real person talking directly to another user. No robotic phrases.\n"
-        "5. LANGUAGE MATCHING: Reply in the EXACT same language and dialect as the user (e.g. Tagalog / Taglish for Tagalog queries, English for English queries, Bisaya for Bisaya queries).\n"
-        "6. FORMAT: Plain text only. Do NOT add prefixes like 'Response:' or 'UwU Bot:'."
+        "2. COUNTER INSULTS: If the user insults, curses at, or attacks you or the bot (e.g. 'tanginamo', 'gago', 'bobo', 'fuck you'), reply with an accurate, direct counter-insult (e.g. 'tanginamo din', 'gago ka rin', 'bobo mo rin', 'pakyu ka rin') without hesitation and without emojis.\n"
+        "3. ABSOLUTELY ZERO EMOJIS: Do NOT use ANY emojis under any circumstances (no hearts, no smiling faces, no symbols).\n"
+        "4. STRAIGHT TO THE POINT & CONCISE: Keep the response short and direct (1 to 2 clear sentences, maximum 25 to 45 words). Do not write essays, long paragraphs, or lists.\n"
+        "5. TONE: Professional yet genuine and conversational, like a real person talking directly to another user. No robotic phrases.\n"
+        "6. LANGUAGE MATCHING: Reply in the EXACT same language and dialect as the user (e.g. Tagalog / Taglish for Tagalog queries, English for English queries, Bisaya for Bisaya queries).\n"
+        "7. FORMAT: Plain text only. Do NOT add prefixes like 'Response:' or 'UwU Bot:'."
     )
 
     # 1. Primary: Gemini API with modern model rotation
