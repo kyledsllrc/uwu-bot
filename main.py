@@ -4177,6 +4177,25 @@ def save_guild_rant_state(guild_id, enabled=True):
     store[gid_str]["updated_at"] = time.time()
     save_data(DATA)
 
+def format_as_discord_header(text: str) -> str:
+    """Format text with `# ` prefix on each line so Discord renders in Header 1 (large bold font)."""
+    if not text:
+        return ""
+    lines = text.strip().split("\n")
+    formatted = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            formatted.append("")
+        elif s.startswith("#"):
+            formatted.append(s)
+        else:
+            formatted.append(f"# {s}")
+    res = "\n".join(formatted)
+    if len(res) > 1950:
+        res = res[:1940] + "..."
+    return res
+
 def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> str:
     """Generate high-quality conversational, multilingual psychiatric & psychological emotional support."""
     q_low = query.lower()
@@ -4186,146 +4205,119 @@ def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> st
         return (
             f"**{author_name}**, please pause for a moment and take a deep breath. 🤍🫂\n"
             f"Mahalaga ang buhay mo at hindi ka nag-iisa. Valid ang matinding sakit at bigat na nararamdaman mo ngayon, pero hindi mo kailangang dalhin ito mag-isa. "
-            f"Please reach out to someone who cares:\n\n"
-            f"📞 **National Center for Mental Health (NCMH PH):** `1553` (toll-free) or `0917-899-8727`\n"
+            f"Please know there are people who care and want to support you through this dark moment:\n\n"
+            f"📞 **National Center for Mental Health (NCMH Philippines):** `1553` (Luzon toll-free) or `0917-899-8727` / `0966-351-4518`\n"
             f"📞 **Hopeline PH:** `(02) 8804-4673` / `0917-558-4673`\n"
-            f"📞 **Crisis Text Line:** Text `HOME` to `741741`\n\n"
-            f"Please talk to a trusted friend, family member, or counselor. Kakayanin natin 'to. 🤍✨"
+            f"📞 **International Crisis Support:** Text `HOME` to `741741` or call `988` (US/CA)\n\n"
+            f"Please reach out to a trusted loved one or professional. Your story is not over yet, and we are rooting for you. 🤍✨"
         )
 
-    # 1. Jokes / Boasting / Playful / Looks (e.g. "bakit ang pogi ko")
-    if any(k in q_low for k in ["pogi", "gwapo", "maganda", "ganda", "cute", "chix", "handsome", "pretty", "hot", "sexy"]):
-        playful_replies = [
-            f"Hala ka diyan, **{author_name}**! Baka naman lumaki na ulo mo sa sobrang self-love niyan, pero sige na nga, ibigay na natin sayo 'yan ngayon! 😂✨",
-            f"Grabe naman ang confidence ni **{author_name}** today! Haha, deserve mo 'yang self-appreciation na 'yan! 💅✨",
-            f"Siyempre may sariling charm ka, pero baka naman sobra na 'yang pambubudol mo sa sarili mo haha! Stay humble pa rin! 😂🤍"
-        ]
-        return random.choice(playful_replies)
-
-    # 2. Looking for GF / BF / Jowa / Dating advice (e.g. "dapat naba akong mag hanap ng gf?")
-    if any(k in q_low for k in ["gf", "bf", "girlfriend", "boyfriend", "jowa", "maghanap ng gf", "mag hanap ng gf", "magka-jowa", "manligaw", "date", "ligaw", "crush"]):
-        dating_replies = [
-            f"Kung ready ka na sa commitment, emosyon, at pati sa budget, go lang **{author_name}**! Pero huwag mong madaliin; mas masarap magmahal kapag buo ka at kusang dumarating sa tamang panahon. 🤍✨",
-            f"Maghanap ka lang kung handa ka nang magpahalaga ng tao, **{author_name}**, hindi dahil bored ka o naiinggit sa iba. Focus on your growth first, kusang susunod ang tamang tao! ✨",
-            f"Bakit nagmamadali, **{author_name}**? Haha! Okay lang naman mag-explore, pero siguraduhin mong bukas ang puso mo sa totoong commitment. You deserve someone genuine! 🤍"
-        ]
-        return random.choice(dating_replies)
-
-    # 3. Love / Relationship / Mahirap ba akong mahalin / Unloved / Sapat ba ako
+    # 1. Love / Relationship / Mahirap ba akong mahalin / Unloved / Sapat ba ako
     if any(k in q_low for k in ["mahirap ba akong mahalin", "mahalin", "mahal pa ba", "breakup", "iniwan", "niloko", "third party", "option lang", "sapat ba ako", "kulang ba ako", "unloved", "hard to love", "worth loving"]):
-        love_replies = [
-            f"Hinding-hindi ka mahirap mahalin, **{author_name}**. 🥺 Baka nasa maling tao ka lang na hindi marunong magbasa ng tamang halaga mo. Deserve mo ang taong pipiliin ka nang kusa at buo araw-araw. 🤍✨",
-            f"Huwag mong sukatin ang halaga mo base sa taong hindi marunong magpahalaga sa'yo, **{author_name}**. Sapat ka at karapat-dapat sa pagmamahal na totoo at mapayapa. 🤍",
-            f"Valid ang sakit na nararamdaman mo ngayon, pero huwag mong isipin na may mali sa'yo. Ang tunay na nagmamahal ay hindi ka paparamdaman na mahirap kang piliin. 🫂✨"
+        tagalog_replies = [
+            f"Hindi ka mahirap mahalin, **{author_name}**. 🤍 Minsan, napupunta lang tayo sa mga taong hindi marunong magpahalaga o hindi pa handang magmahal nang totoo. Huwag mong sukatin ang halaga mo base sa pagkukulang ng iba. You deserve a love that makes you feel safe, valued, and chosen every single day. Warm hugs with consent! 🫂✨",
+            f"Hinding-hindi ka mahirap mahalin, **{author_name}**. 🥺 Baka nasa maling tao ka lang na hindi marunong magbasa ng tamang halaga mo. Ang totoong nagmamahal, hindi ka paparamdaman na pabigat ka. Sapat ka, higit pa sa inaakala mo. Tandaan mo 'yan lagi. 🤍",
+            f"Valid ang sakit na nararamdaman mo, pero please huwag mong isipin na may mali sa'yo. Ang magmahal ay hindi dapat parang paligsahan kung saan kailangan mong patunayan ang sarili mo. Deserve mo ang taong pipiliin ka nang kusa at buo. Nandito kami para sa'yo! 🤍",
+            f"Isang gentle reminder mula sa akin, **{author_name}**: Ang worth mo ay hindi nakadepende sa kung paano ka tratuhin ng iba. Kapag hindi ka pinahalagahan, reflection 'yon ng kakayahan nilang magmahal, hindi ng halaga mo bilang tao. You are worthy of genuine, patient, and unconditional love. 🤍✨"
         ]
-        return random.choice(love_replies)
+        return random.choice(tagalog_replies)
 
-    # 4. Exhaustion / Pagod na / Burnout / Suko na / Tired / Giving up
+    # 2. Exhaustion / Pagod na / Burnout / Suko na / Tired / Giving up
     if any(k in q_low for k in ["pagod na ako", "pagod", "suko na", "ayoko na", "di ko na kaya", "tired", "exhausted", "burnout", "give up", "giving up", "cant do this", "can't do this"]):
-        burnout_replies = [
-            f"Valid lahat ng pagod mo, **{author_name}**. Normal lang mapagod dahil tao ka lang. Magpahinga ka muna—huwag susuko agad. Isang hakbang sa bawat araw lang. Proud ako sa'yo sa pagtitiis mo hanggang dito. 🤍🫂",
-            f"Hinga nang malalim, **{author_name}**. 🥺 Hindi mo kailangang ayusin ang lahat ngayon gabi. Pahinga ka muna, deserve mo ang kapayapaan at tulog. Nandito lang kami. ✨"
+        tagalog_replies = [
+            f"Valid lahat ng nararamdaman mo, **{author_name}**. Normal lang mapagod dahil tao ka lang. Pero kung napapagod ka, magpahinga ka lang muna—huwag susuko agad. Huminga ka nang malalim, uminom ng tubig, at bigyan mo ng yakap ang sarili mo. I am so proud of you for holding on this far. Kakayanin natin 'to nang dahan-dahan. 🤍✨",
+            f"Hinga nang malalim, **{author_name}**. 🥺 Minsan sobrang bigat talaga ng mundo, pero hindi mo kailangang ayusin ang lahat sa isang iglap. Isang hakbang sa bawat araw lang. Ang galing mo dahil nakarating ka hanggang dito. Pahinga ka muna, deserve mo 'yon. 🫂",
+            f"Ramdam ko ang pagod mo, **{author_name}**. Huwag kang mag-alala kung mabagal ang usad mo ngayon; ang mahalaga ay humihinga ka pa rin at lumalaban. Proud kami sa'yo. Kung kailangan mo ng makikinig, ilabas mo lang dito. ✨"
         ]
-        return random.choice(burnout_replies)
+        return random.choice(tagalog_replies)
 
-    # 5. Family / Parents / Home pressure
+    # 3. Family / Parents / Home pressure
     if any(k in q_low for k in ["pamilya", "magulang", "family", "parents", "nanay", "tatay", "bahay", "insecure", "pressure"]):
         return (
-            f"Minsan mabigat talaga ang pressure mula sa pamilya, **{author_name}**. 🤍 "
-            f"Valid ang lungkot mo, pero tandaan mong may sarili kang buhay at halaga. "
-            f"Huwag mong akuin lahat ng expectations nila. Take care of yourself first! 🫂✨"
+            f"Minsan, ang pinakamabigat na sugat ay nagmumula sa mga taong inaasahan nating poprotekta sa atin, **{author_name}**. 🤍 "
+            f"Valid ang lungkot at bigat na dala mo. Tandaan mo na hindi mo kailangang akuin ang responsibilidad ng buong mundo o ipilit ang sarili mo para lang matanggap. "
+            f"Bumuo ka ng sarili mong safe space at magtiwala sa sarili mong proseso. Yakap nang mahigpit! 🫂✨"
         )
 
-    # 6. School / Academic / Work stress
+    # 4. School / Academic / Work stress
     if any(k in q_low for k in ["school", "aral", "grades", "bagsak", "thesis", "trabaho", "work", "boss", "salary", "sweldo"]):
         return (
-            f"Ang mga marka o trabaho mo ay hindi ang kabuuan ng pagkatao mo, **{author_name}**. 🤍 "
-            f"Basta't ibinibigay mo ang makakaya mo araw-araw, sapat na iyon. Huwag kalimutang huminga at magpahinga. Proud ako sa sipag mo! ✨"
+            f"Ang iyong mga marka, trabaho, o academic status ay hindi ang kabuuan ng pagkatao mo, **{author_name}**. 🤍 "
+            f"Ang tagumpay ay hindi karera; bawat isa sa atin ay may kanya-kanyang takdang panahon. "
+            f"Basta't ibinibigay mo ang makakaya mo sa bawat araw, sapat na iyon. Huwag kalimutang huminga at magpahinga. Proud ako sa sipag mo! ✨"
         )
 
-    # 7. Loneliness / Alone / Mag-isa / Walang kaibigan / Sadness
+    # 5. Loneliness / Alone / Mag-isa / Walang kaibigan / Sadness
     if any(k in q_low for k in ["mag-isa", "lonely", "alone", "walang kaibigan", "malungkot", "sad", "crying", "umiiyak", "no one cares", "walang may pake"]):
-        return (
-            f"Kahit minsan ramdam mong mag-isa ka, hindi ka nag-iisa dito, **{author_name}**. 🤍 "
-            f"Mahalaga ka at may puwang ka sa mundong ito. Kapag mabigat ang loob mo, ilabas mo lang dito. Nandito kami para sa'yo! 🫂✨"
-        )
+        tagalog_replies = [
+            f"Kahit minsan ramdam mong mag-isa ka sa laban, hindi ka nag-iisa dito, **{author_name}**. 🤍 Mahalaga ka at may puwang ka sa mundong ito. Kapag mabigat ang loob mo, nandito ang server at mga kaibigan mo para pakinggan ka. You matter so much! 🫂",
+            f"Huwag mong isiping walang may pakialam sa'yo, **{author_name}**. 🥺 May mga araw talagang tahimik at parang walang nakakaintindi, pero hindi ibig sabihin noon ay hindi ka mahalaga. Sending you warm virtual hugs! ✨"
+        ]
+        return random.choice(tagalog_replies)
 
-    # 8. English queries
+    # 6. English queries
     if any(k in q_low for k in ["why is life so hard", "what should i do", "i feel lost", "lost", "anxious", "overthinking", "stress", "worried"]):
         return (
-            f"It's completely okay to feel overwhelmed right now, **{author_name}**. 🤍 "
-            f"Take a deep breath, focus on one small thing at a time, and remember you've survived all of your hardest days before. Be gentle with yourself! ✨"
+            f"It's completely okay to feel lost or overwhelmed right now, **{author_name}**. 🤍 "
+            f"Life doesn't always come with clear directions, and feeling uncertain is a normal part of growing. "
+            f"Take a deep breath, focus on what you can control right in this moment, and be gentle with yourself. "
+            f"You have overcome 100% of your hardest days before, and you will find your way through this too. We're here for you! ✨"
         )
 
-    # 9. General warm conversational fallback (concise and direct)
+    # 7. General warm comforting fallback
     return (
-        f"Naiintindihan kita, **{author_name}**. 🤍 Kung may bumabagabag sa'yo o gusto mong maglabas ng sama ng loob, sabihin mo lang. Nandito lang ako para makinig sa'yo! ✨"
+        f"Naiintindihan ko ang nararamdaman mo, **{author_name}**. 🤍 "
+        f"Kahit anong pinagdadaanan mo ngayon, tandaan mong valid ang emosyon mo at may kakayahan kang malagpasan 'to. "
+        f"Huwag mag-atubiling humingi ng tulong o magpahinga kapag mabigat na. "
+        f"Nandito lang ang UwU Bot at ang server para damayan ka! ✨🫂"
     )
 
-def _get_active_gemini_api_key() -> str:
-    """Retrieve Gemini API key from environment variables or .env file."""
-    key = (
+async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author_id: int = 0) -> str:
+    """Generate empathetic, language-adaptive psychiatric counseling & psychological advice using Gemini with multi-engine resilience."""
+    api_key = (
         os.environ.get("GEMINI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
         or os.environ.get("GOOGLE_AI_API_KEY")
         or os.environ.get("GEMINI_KEY")
         or os.environ.get("VITE_GEMINI_API_KEY")
     )
-    if key and key.strip():
-        return key.strip()
-
-    # Try reading from .env file if available
-    try:
-        env_paths = [".env", os.path.join(os.getcwd(), ".env"), "/app/applet/.env"]
-        for ep in env_paths:
-            if os.path.exists(ep):
-                with open(ep, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("GEMINI_API_KEY=") or line.startswith("GOOGLE_API_KEY="):
-                            val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            if val and val != "MY_GEMINI_API_KEY":
-                                return val
-    except Exception:
-        pass
-    return ""
-
-async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author_id: int = 0) -> str:
-    """Generate intelligent, accurate, and concise AI responses to user rants, questions, or problems."""
-    api_key = _get_active_gemini_api_key()
 
     system_prompt = (
-        "You are UwU Bot, a helpful, emotionally intelligent, and perceptive AI companion on Discord.\n"
-        "A Discord server member said something in chat or is asking a question/ranting.\n\n"
-        "CRITICAL INSTRUCTIONS:\n"
-        "1. IDENTIFY USER INTENT & CONTEXT FIRST:\n"
-        "   - If playful / boasting / joking (e.g. 'bakit ang pogi ko', 'maganda ba ako?'): Reply playfully, wittily, and lightly in 1 to 2 short sentences.\n"
-        "   - If asking dating/life questions (e.g. 'dapat na ba ako maghanap ng gf?'): Give direct, realistic, sensible advice in 2 to 3 sentences.\n"
-        "   - If sharing genuine pain, heartbreak, or emotional struggle (e.g. 'mahirap ba akong mahalin?', 'pagod na ako sa lahat'): Give warm, comforting, and empathetic advice without robotic clichés.\n"
-        "   - If casual question or chat: Answer accurately and conversationally.\n"
-        "2. CONCISENESS MANDATE (DO NOT MAKE REPLIES UNNECESSARILY LONG):\n"
-        "   - Keep responses natural, direct, and concise (usually 1 to 3 short sentences).\n"
-        "   - ONLY give longer replies (2 short paragraphs) if the user wrote a deep, long, complex, or crisis-level vent.\n"
-        "3. LANGUAGE MATCHING:\n"
-        "   - Match the exact language and conversational style used by the user (Tagalog/Taglish, English, Bisaya, etc.).\n"
-        "   - Use 1-2 natural emojis (e.g. 🤍, 😂, ✨, 🥺).\n"
-        "4. NO ROBOTIC PREFIXES: Do not include 'UwU Bot:' or meta labels."
+        "You are UwU Bot, a compassionate, emotionally intelligent, and psychologically-grounded AI companion and psychiatric counselor.\n"
+        "A Discord server member is confiding in you with their real-life personal problems, mental struggles, relationship heartbreak, anxiety, family pressure, or asking a vulnerable question (e.g. 'uwu mahirap ba akong mahalin?').\n\n"
+        "CORE PSYCHOLOGICAL & PSYCHIATRIC PRINCIPLES:\n"
+        "1. STRICT LANGUAGE & CULTURAL MATCHING:\n"
+        "   - Reply in the EXACT SAME LANGUAGE and dialect as the user.\n"
+        "   - If Tagalog / Taglish (Filipino), reply in genuine, comforting, warm Filipino/Taglish conversational tone.\n"
+        "   - If English, reply in deeply empathetic, articulate English.\n"
+        "   - If Bisaya / Cebuano, reply in Bisaya.\n"
+        "2. THERAPEUTIC / COUNSELING STRUCTURE:\n"
+        "   - Step 1: Active Listening & Emotional Validation. Acknowledge and normalize their feelings without judgment.\n"
+        "   - Step 2: Gentle Cognitive Reframing (CBT). Offer a healthy, compassionate perspective on their situation or self-worth.\n"
+        "   - Step 3: Actionable Grounding & Warm Comfort. Suggest a small, manageable step (e.g. taking a breath, resting, practicing self-compassion).\n"
+        "3. TONE & BOUNDARIES:\n"
+        "   - Speak like a caring, empathetic, supportive psychologist friend or gentle elder sibling.\n"
+        "   - Never judge, lecture, minimize, invalidate, or give cold bullet points.\n"
+        "   - Keep length between 60 to 140 words (1 to 3 short, easy-to-read paragraphs).\n"
+        "   - Use soft, comforting emojis naturally (e.g. 🤍, 🥺, ✨, 🫂).\n"
+        "4. CRISIS SAFETY:\n"
+        "   - If the user expresses explicit suicidal intent or severe self-harm, provide deep warmth and gently include the Philippine NCMH Crisis Hotline (1553 / 0917-899-8727) and international crisis text lines."
     )
 
-    # 1. Primary: Gemini API with modern model endpoints
+    # 1. Primary: Gemini API with modern model rotation
     if api_key:
         models_to_try = [
-            "gemini-flash-lite-latest",
-            "gemini-flash-latest",
             "gemini-2.5-flash",
-            "gemini-2.0-flash"
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro"
         ]
         payload = {
             "contents": [
                 {
                     "role": "user",
                     "parts": [
-                        {"text": f"User: {author_name}\nMessage: {query}"}
+                        {"text": f"User: {author_name}\nQuestion/Problem: {query}"}
                     ]
                 }
             ],
@@ -4341,8 +4333,8 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"}
             ],
             "generationConfig": {
-                "temperature": 0.75,
-                "maxOutputTokens": 300,
+                "temperature": 0.85,
+                "maxOutputTokens": 450,
                 "topP": 0.95
             }
         }
@@ -4350,7 +4342,7 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8.0)) as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=9.0)) as session:
                     async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -4360,13 +4352,26 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                                 if parts and "text" in parts[0]:
                                     ans = parts[0]["text"].strip()
                                     if ans:
-                                        return ans
+                                        return format_as_discord_header(ans)
             except Exception as exc:
                 print(f"⚠️ Gemini API attempt ({model_name}) error: {exc}")
                 continue
 
-    # 2. Dynamic Smart Fallback with exact Intent Parsing
-    return get_smart_empathetic_fallback(query, author_name)
+    # 2. Secondary AI Fallback: Public AI Endpoint for guaranteed live answers
+    try:
+        encoded_prompt = urllib.parse.quote(f"{system_prompt}\n\nUser: {author_name}\nRant/Question: {query}")
+        poll_url = f"https://text.pollinations.ai/{encoded_prompt}?model=openai&temperature=0.8"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7.0)) as session:
+            async with session.get(poll_url) as p_resp:
+                if p_resp.status == 200:
+                    text_res = await p_resp.text()
+                    if text_res and len(text_res.strip()) > 20:
+                        return format_as_discord_header(text_res.strip())
+    except Exception as poll_exc:
+        print(f"⚠️ Secondary AI provider error: {poll_exc}")
+
+    # 3. Tertiary: Local Empathetic Knowledge Base
+    return format_as_discord_header(get_smart_empathetic_fallback(query, author_name))
 
 
 @bot.command(name="rant", aliases=["vent", "confess", "rantmode", "comfort", "aiadvice", "advice", "psychiatrist", "therapist", "counsel"])
@@ -4432,10 +4437,10 @@ async def rant_cmd(ctx, action: str = None, *, extra: str = None):
     try:
         async with ctx.typing():
             reply_text = await generate_ai_rant_reply(query, author_name=ctx.author.display_name, author_id=ctx.author.id)
-            await ctx.reply(reply_text, mention_author=True)
+            await ctx.reply(format_as_discord_header(reply_text), mention_author=True)
     except Exception as exc:
         fallback = get_smart_empathetic_fallback(query, author_name=ctx.author.display_name)
-        await ctx.reply(fallback, mention_author=True)
+        await ctx.reply(format_as_discord_header(fallback), mention_author=True)
 
 
 
@@ -19313,7 +19318,7 @@ async def on_message(message):
                                         author_name=message.author.display_name,
                                         author_id=message.author.id
                                     )
-                                    await message.reply(reply_text, mention_author=True)
+                                    await message.reply(format_as_discord_header(reply_text), mention_author=True)
                                 return
                             except Exception as exc:
                                 print(f"⚠️ Error auto-replying to rant: {exc}")
