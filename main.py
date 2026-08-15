@@ -4389,6 +4389,8 @@ async def stop_cmd(ctx):
 # PERSISTENT 24/7 VOICE ENGINE
 # ==============================================
 MODE_247_GUILDS = set()
+GUILD_VOICE_CONNECTING = {}
+LAST_VOICE_RECONNECT = {}
 
 def get_voice_247_store():
     """Retrieve persistent 24/7 voice settings."""
@@ -4416,36 +4418,66 @@ def save_guild_247_state(guild_id, channel_id=None, enabled=True):
     save_data(DATA)
 
 async def connect_voice_247(channel):
-    """Connect bot to a 24/7 voice channel with multi-engine fallback (Wavelink + Discord Voice)."""
+    """Connect bot to a 24/7 voice channel stably without bouncing or flapping."""
     if not channel or not getattr(channel, "guild", None):
         return None
     guild = channel.guild
+    gid = guild.id
+
+    # Connection debounce check (prevent race conditions & flapping)
+    now = time.time()
+    if gid in GUILD_VOICE_CONNECTING and (now - GUILD_VOICE_CONNECTING[gid]) < 6.0:
+        return guild.voice_client
+    GUILD_VOICE_CONNECTING[gid] = now
+
     try:
         vc = guild.voice_client
-        if vc and vc.is_connected() and vc.channel and vc.channel.id == channel.id:
-            return vc
-        if vc:
+
+        # 1. If already connected to target channel, do not touch or disconnect!
+        if vc and vc.is_connected():
+            if vc.channel and vc.channel.id == channel.id:
+                return vc
+            # If connected in another channel, move smoothly without disconnecting
             try:
-                await vc.disconnect(force=True)
+                await vc.move_to(channel)
+                return vc
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
 
-        # 1. Try Wavelink player
+        # 2. Check if Wavelink has any active/connected nodes
+        has_active_wavelink_node = False
         try:
-            vc = await channel.connect(cls=wavelink.Player, self_deaf=True)
-            if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
-                vc.autoplay = wavelink.AutoPlay.enabled
-            return vc
+            if hasattr(wavelink, "Pool") and hasattr(wavelink.Pool, "nodes"):
+                for node in wavelink.Pool.nodes.values():
+                    if getattr(node, "status", None) == wavelink.NodeStatus.CONNECTED:
+                        has_active_wavelink_node = True
+                        break
         except Exception:
-            # 2. Fallback to native discord voice
-            vc = await channel.connect(timeout=15.0, reconnect=True, self_deaf=True)
+            pass
+
+        # If Wavelink nodes are active, try Wavelink Player
+        if has_active_wavelink_node:
+            try:
+                vc = await channel.connect(cls=wavelink.Player, self_deaf=True, timeout=15.0)
+                if hasattr(wavelink, "AutoPlay") and hasattr(vc, "autoplay"):
+                    vc.autoplay = wavelink.AutoPlay.enabled
+                return vc
+            except Exception as w_err:
+                print(f"⚠️ Wavelink 24/7 connect failed in {guild.name}, trying native voice: {w_err}")
+
+        # 3. Fallback or standard native voice connection
+        if not guild.voice_client or not guild.voice_client.is_connected():
+            vc = await channel.connect(reconnect=True, self_deaf=True, timeout=15.0)
             return vc
+
+        return guild.voice_client
     except Exception as exc:
         print(f"⚠️ 24/7 Voice connection exception in {guild.name} ({channel.name}): {exc}")
-        return None
+        return guild.voice_client
+    finally:
+        GUILD_VOICE_CONNECTING.pop(gid, None)
 
-@tasks.loop(seconds=25)
+@tasks.loop(seconds=45)
 async def voice_247_watchdog():
     """Continuous 24/7 background guardian loop keeping the bot connected across all servers."""
     try:
@@ -4462,7 +4494,8 @@ async def voice_247_watchdog():
                 continue
 
             vc = guild.voice_client
-            if not vc or not vc.is_connected() or not vc.channel or vc.channel.id != channel.id:
+            # Only connect if completely disconnected or missing
+            if not vc or not vc.is_connected():
                 try:
                     await connect_voice_247(channel)
                 except Exception:
@@ -4627,7 +4660,20 @@ async def on_voice_state_update(member, before, after):
         if before.channel and not after.channel:
             guild_id = member.guild.id
             if is_guild_247_enabled(guild_id) or guild_id in MODE_247_GUILDS:
-                await asyncio.sleep(1.5)
+                # Cooldown check: do not trigger reconnects more frequently than once every 8 seconds
+                now = time.time()
+                last_time = LAST_VOICE_RECONNECT.get(guild_id, 0)
+                if now - last_time < 8.0:
+                    return
+                LAST_VOICE_RECONNECT[guild_id] = now
+
+                await asyncio.sleep(2.5)
+
+                # Check if bot was already reconnected or moved by another routine
+                vc = member.guild.voice_client
+                if vc and vc.is_connected():
+                    return
+
                 target_channel = before.channel
                 store = get_voice_247_store()
                 cfg_cid = store.get(str(guild_id), {}).get("channel_id")
