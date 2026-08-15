@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta
 from threading import Lock
 from collections import deque
 from urllib.parse import quote_plus
+import urllib.parse
 import urllib.request
 import firebase_admin
 from firebase_admin import credentials, db
@@ -4177,15 +4178,28 @@ def save_guild_rant_state(guild_id, enabled=True):
     save_data(DATA)
 
 def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> str:
-    """Generate high-quality conversational, multilingual empathetic advice when API is offline."""
+    """Generate high-quality conversational, multilingual psychiatric & psychological emotional support."""
     q_low = query.lower()
+
+    # 0. Crisis / Self-Harm / Hopelessness detection (Psychological first aid & hotlines)
+    if any(k in q_low for k in ["magpakamatay", "suicide", "end my life", "kill myself", "gusto ko na mawala", "ayoko na mabuhay", "mamatay na sana", "self harm", "laslas"]):
+        return (
+            f"**{author_name}**, please pause for a moment and take a deep breath. 🤍🫂\n"
+            f"Mahalaga ang buhay mo at hindi ka nag-iisa. Valid ang matinding sakit at bigat na nararamdaman mo ngayon, pero hindi mo kailangang dalhin ito mag-isa. "
+            f"Please know there are people who care and want to support you through this dark moment:\n\n"
+            f"📞 **National Center for Mental Health (NCMH Philippines):** `1553` (Luzon toll-free) or `0917-899-8727` / `0966-351-4518`\n"
+            f"📞 **Hopeline PH:** `(02) 8804-4673` / `0917-558-4673`\n"
+            f"📞 **International Crisis Support:** Text `HOME` to `741741` or call `988` (US/CA)\n\n"
+            f"Please reach out to a trusted loved one or professional. Your story is not over yet, and we are rooting for you. 🤍✨"
+        )
 
     # 1. Love / Relationship / Mahirap ba akong mahalin / Unloved / Sapat ba ako
     if any(k in q_low for k in ["mahirap ba akong mahalin", "mahalin", "mahal pa ba", "breakup", "iniwan", "niloko", "third party", "option lang", "sapat ba ako", "kulang ba ako", "unloved", "hard to love", "worth loving"]):
         tagalog_replies = [
             f"Hindi ka mahirap mahalin, **{author_name}**. 🤍 Minsan, napupunta lang tayo sa mga taong hindi marunong magpahalaga o hindi pa handang magmahal nang totoo. Huwag mong sukatin ang halaga mo base sa pagkukulang ng iba. You deserve a love that makes you feel safe, valued, and chosen every single day. Warm hugs with consent! 🫂✨",
             f"Hinding-hindi ka mahirap mahalin, **{author_name}**. 🥺 Baka nasa maling tao ka lang na hindi marunong magbasa ng tamang halaga mo. Ang totoong nagmamahal, hindi ka paparamdaman na pabigat ka. Sapat ka, higit pa sa inaakala mo. Tandaan mo 'yan lagi. 🤍",
-            f"Valid ang sakit na nararamdaman mo, pero please huwag mong isipin na may mali sa'yo. Ang magmahal ay hindi dapat parang paligsahan kung saan kailangan mong patunayan ang sarili mo. Deserve mo ang taong pipiliin ka nang kusa at buo. Nandito kami para sa'yo! 🤍"
+            f"Valid ang sakit na nararamdaman mo, pero please huwag mong isipin na may mali sa'yo. Ang magmahal ay hindi dapat parang paligsahan kung saan kailangan mong patunayan ang sarili mo. Deserve mo ang taong pipiliin ka nang kusa at buo. Nandito kami para sa'yo! 🤍",
+            f"Isang gentle reminder mula sa akin, **{author_name}**: Ang worth mo ay hindi nakadepende sa kung paano ka tratuhin ng iba. Kapag hindi ka pinahalagahan, reflection 'yon ng kakayahan nilang magmahal, hindi ng halaga mo bilang tao. You are worthy of genuine, patient, and unconditional love. 🤍✨"
         ]
         return random.choice(tagalog_replies)
 
@@ -4198,7 +4212,23 @@ def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> st
         ]
         return random.choice(tagalog_replies)
 
-    # 3. Loneliness / Alone / Mag-isa / Walang kaibigan / Sadness
+    # 3. Family / Parents / Home pressure
+    if any(k in q_low for k in ["pamilya", "magulang", "family", "parents", "nanay", "tatay", "bahay", "insecure", "pressure"]):
+        return (
+            f"Minsan, ang pinakamabigat na sugat ay nagmumula sa mga taong inaasahan nating poprotekta sa atin, **{author_name}**. 🤍 "
+            f"Valid ang lungkot at bigat na dala mo. Tandaan mo na hindi mo kailangang akuin ang responsibilidad ng buong mundo o ipilit ang sarili mo para lang matanggap. "
+            f"Bumuo ka ng sarili mong safe space at magtiwala sa sarili mong proseso. Yakap nang mahigpit! 🫂✨"
+        )
+
+    # 4. School / Academic / Work stress
+    if any(k in q_low for k in ["school", "aral", "grades", "bagsak", "thesis", "trabaho", "work", "boss", "salary", "sweldo"]):
+        return (
+            f"Ang iyong mga marka, trabaho, o academic status ay hindi ang kabuuan ng pagkatao mo, **{author_name}**. 🤍 "
+            f"Ang tagumpay ay hindi karera; bawat isa sa atin ay may kanya-kanyang takdang panahon. "
+            f"Basta't ibinibigay mo ang makakaya mo sa bawat araw, sapat na iyon. Huwag kalimutang huminga at magpahinga. Proud ako sa sipag mo! ✨"
+        )
+
+    # 5. Loneliness / Alone / Mag-isa / Walang kaibigan / Sadness
     if any(k in q_low for k in ["mag-isa", "lonely", "alone", "walang kaibigan", "malungkot", "sad", "crying", "umiiyak", "no one cares", "walang may pake"]):
         tagalog_replies = [
             f"Kahit minsan ramdam mong mag-isa ka sa laban, hindi ka nag-iisa dito, **{author_name}**. 🤍 Mahalaga ka at may puwang ka sa mundong ito. Kapag mabigat ang loob mo, nandito ang server at mga kaibigan mo para pakinggan ka. You matter so much! 🫂",
@@ -4206,7 +4236,7 @@ def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> st
         ]
         return random.choice(tagalog_replies)
 
-    # 4. English queries
+    # 6. English queries
     if any(k in q_low for k in ["why is life so hard", "what should i do", "i feel lost", "lost", "anxious", "overthinking", "stress", "worried"]):
         return (
             f"It's completely okay to feel lost or overwhelmed right now, **{author_name}**. 🤍 "
@@ -4215,7 +4245,7 @@ def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> st
             f"You have overcome 100% of your hardest days before, and you will find your way through this too. We're here for you! ✨"
         )
 
-    # 5. General warm comforting fallback
+    # 7. General warm comforting fallback
     return (
         f"Naiintindihan ko ang nararamdaman mo, **{author_name}**. 🤍 "
         f"Kahit anong pinagdadaanan mo ngayon, tandaan mong valid ang emosyon mo at may kakayahan kang malagpasan 'to. "
@@ -4224,29 +4254,38 @@ def get_smart_empathetic_fallback(query: str, author_name: str = "Friend") -> st
     )
 
 async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author_id: int = 0) -> str:
-    """Generate empathetic, language-adaptive AI response to user rants/problems using Gemini with fallback."""
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-
-    system_prompt = (
-        "You are UwU Bot, a deeply empathetic, emotionally intelligent, caring, and comforting Discord bot companion.\n"
-        "A user in a Discord server is sharing a heart-to-heart struggle, personal pain, relationship/love dilemma, life stress, burnout, or asking a vulnerable question (for example: 'uwu mahirap ba akong mahalin?').\n\n"
-        "MANDATORY INSTRUCTIONS:\n"
-        "1. STRICT LANGUAGE MATCHING: You MUST reply in the EXACT SAME LANGUAGE and natural conversational style used by the user:\n"
-        "   - If they write in Tagalog or Taglish (Filipino), reply in genuine, comforting, warm, and natural conversational Tagalog / Taglish.\n"
-        "   - If they write in English, reply in empathetic, warm English.\n"
-        "   - If they write in Bisaya / Cebuano, reply in Bisaya.\n"
-        "   - If in any other language, match that language perfectly.\n"
-        "2. TONE & PERSONA:\n"
-        "   - Speak like a supportive, understanding close friend or gentle, compassionate elder sibling.\n"
-        "   - Validate their emotions genuinely first. Never dismiss them, minimize their struggle, lecture them, or give cold bullet points.\n"
-        "   - Provide gentle perspective, reassurance, and heartfelt encouragement.\n"
-        "   - Keep your reply concise, organic, and readable (1 to 3 short paragraphs, around 50 to 120 words).\n"
-        "   - Add subtle warm touches and soft emojis naturally (e.g. 🤍, 🥺, ✨, 🫂).\n"
-        "3. FORMATTING:\n"
-        "   - Output plain text suitable for a Discord message reply.\n"
-        "   - Do NOT include robot prefixes like 'Response:', 'UwU Bot:', or meta commentary."
+    """Generate empathetic, language-adaptive psychiatric counseling & psychological advice using Gemini with multi-engine resilience."""
+    api_key = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GOOGLE_AI_API_KEY")
+        or os.environ.get("GEMINI_KEY")
+        or os.environ.get("VITE_GEMINI_API_KEY")
     )
 
+    system_prompt = (
+        "You are UwU Bot, a compassionate, emotionally intelligent, and psychologically-grounded AI companion and psychiatric counselor.\n"
+        "A Discord server member is confiding in you with their real-life personal problems, mental struggles, relationship heartbreak, anxiety, family pressure, or asking a vulnerable question (e.g. 'uwu mahirap ba akong mahalin?').\n\n"
+        "CORE PSYCHOLOGICAL & PSYCHIATRIC PRINCIPLES:\n"
+        "1. STRICT LANGUAGE & CULTURAL MATCHING:\n"
+        "   - Reply in the EXACT SAME LANGUAGE and dialect as the user.\n"
+        "   - If Tagalog / Taglish (Filipino), reply in genuine, comforting, warm Filipino/Taglish conversational tone.\n"
+        "   - If English, reply in deeply empathetic, articulate English.\n"
+        "   - If Bisaya / Cebuano, reply in Bisaya.\n"
+        "2. THERAPEUTIC / COUNSELING STRUCTURE:\n"
+        "   - Step 1: Active Listening & Emotional Validation. Acknowledge and normalize their feelings without judgment.\n"
+        "   - Step 2: Gentle Cognitive Reframing (CBT). Offer a healthy, compassionate perspective on their situation or self-worth.\n"
+        "   - Step 3: Actionable Grounding & Warm Comfort. Suggest a small, manageable step (e.g. taking a breath, resting, practicing self-compassion).\n"
+        "3. TONE & BOUNDARIES:\n"
+        "   - Speak like a caring, empathetic, supportive psychologist friend or gentle elder sibling.\n"
+        "   - Never judge, lecture, minimize, invalidate, or give cold bullet points.\n"
+        "   - Keep length between 60 to 140 words (1 to 3 short, easy-to-read paragraphs).\n"
+        "   - Use soft, comforting emojis naturally (e.g. 🤍, 🥺, ✨, 🫂).\n"
+        "4. CRISIS SAFETY:\n"
+        "   - If the user expresses explicit suicidal intent or severe self-harm, provide deep warmth and gently include the Philippine NCMH Crisis Hotline (1553 / 0917-899-8727) and international crisis text lines."
+    )
+
+    # 1. Primary: Gemini API with modern model rotation
     if api_key:
         models_to_try = [
             "gemini-2.5-flash",
@@ -4259,7 +4298,7 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                 {
                     "role": "user",
                     "parts": [
-                        {"text": f"User: {author_name}\nQuestion/Rant: {query}"}
+                        {"text": f"User: {author_name}\nQuestion/Problem: {query}"}
                     ]
                 }
             ],
@@ -4268,9 +4307,15 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                     {"text": system_prompt}
                 ]
             },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"}
+            ],
             "generationConfig": {
                 "temperature": 0.85,
-                "maxOutputTokens": 380,
+                "maxOutputTokens": 450,
                 "topP": 0.95
             }
         }
@@ -4278,7 +4323,7 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8.0)) as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=9.0)) as session:
                     async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -4293,10 +4338,24 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
                 print(f"⚠️ Gemini API attempt ({model_name}) error: {exc}")
                 continue
 
+    # 2. Secondary AI Fallback: Public AI Endpoint for guaranteed live answers
+    try:
+        encoded_prompt = urllib.parse.quote(f"{system_prompt}\n\nUser: {author_name}\nRant/Question: {query}")
+        poll_url = f"https://text.pollinations.ai/{encoded_prompt}?model=openai&temperature=0.8"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7.0)) as session:
+            async with session.get(poll_url) as p_resp:
+                if p_resp.status == 200:
+                    text_res = await p_resp.text()
+                    if text_res and len(text_res.strip()) > 20:
+                        return text_res.strip()
+    except Exception as poll_exc:
+        print(f"⚠️ Secondary AI provider error: {poll_exc}")
+
+    # 3. Tertiary: Local Empathetic Knowledge Base
     return get_smart_empathetic_fallback(query, author_name)
 
 
-@bot.command(name="rant", aliases=["vent", "confess", "rantmode", "comfort", "aiadvice", "advice"])
+@bot.command(name="rant", aliases=["vent", "confess", "rantmode", "comfort", "aiadvice", "advice", "psychiatrist", "therapist", "counsel"])
 async def rant_cmd(ctx, action: str = None, *, extra: str = None):
     """Toggle AI Rant auto-reply on/off for server, or directly vent a problem to UwU Bot."""
     if is_category_disabled(ctx.guild, 'social'):
@@ -4311,8 +4370,8 @@ async def rant_cmd(ctx, action: str = None, *, extra: str = None):
             return await ctx.send("❌ Only Server Owner, Administrators, or Moderators can toggle AI Rant mode!")
         save_guild_rant_state(guild.id, enabled=True)
         embed = discord.Embed(
-            title="🟢 AI Rant & Vent Auto-Reply: ENABLED",
-            description="Members can now type `uwu <rant or problem>` and UwU Bot will automatically reply with personalized, empathetic AI comfort and advice in their language!\n\n"
+            title="🟢 AI Emotional Support & Rant Auto-Reply: ENABLED",
+            description="Members can now type `uwu <rant or problem>` and UwU Bot will automatically reply with personalized, empathetic AI psychiatric & emotional comfort in their language!\n\n"
                         "💡 **Examples:**\n"
                         "• `uwu mahirap ba akong mahalin?`\n"
                         "• `uwu bat ang sakit kapag iniwan ka?`\n"
