@@ -25178,12 +25178,14 @@ async def help_cmd(ctx, category: str = None):
                 ("volume", "[1-100] — set music volume"),
                 ("lyrics", "[song name] — search song lyrics"),
                 ("save", "[name] — save track to playlist"),
+                ("movie", "<title> [schedule] — announce movie night stream with poster & RSVP (Owner only)"),
             ],
         },
         "moderation": {
             "title": "🛡️ Moderation & Server Protection",
             "aliases": ["mod"],
             "items": [
+                ("movie", "<title> [schedule] — host & announce movie night stream with poster & RSVP (Owner only)"),
                 ("kick", "@user [reason] — kick member"),
                 ("ban", "@user [reason] — ban member"),
                 ("unban", "<user_id_or_tag> [reason] — unban member"),
