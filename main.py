@@ -264,48 +264,62 @@ bot_lease_stop = threading.Event()
 # Singapore FIRST = LOWEST PING for PH 🇵🇭
 # ==============================================
 LAVALINK_NODE_CONFIGS = [
-    # 🏆 TOP — Singapore (BEST FOR PH!)
-    {
-        "uri": "https://lavalinkv4.serenetia.com:443",
-        "password": "https://dsc.gg/ajidevserver",
-        "retries": 3,
-    },
-    {
-        "uri": "https://sg.lavalink.heavencloud.in:443",
-        "password": "heavencloud",
-        "retries": 2,
-    },
-    {
-        "uri": "http://sg1-nodelink.nyxbot.app:3000",
-        "password": "nyxbot.app/support",
-        "retries": 2,
-    },
-    # ✅ GOOD — Backup Nodes
-    {
-        "uri": "http://lavalink.darrenofficial.com:80",
-        "password": "anything",
-        "retries": 2,
-    },
-    {
-        "uri": "https://lavalink.heavencloud.in:443",
-        "password": "heavencloud",
-        "retries": 2,
-    },
-    {
-        "uri": "https://lavalink.devamop.in:443",
-        "password": "DevamOP",
-        "retries": 2,
-    },
-    # ⚠️ FAIR — Last Resort Fallback
-    {
-        "uri": "https://lava-v4.ajieblogs.eu.org:443",
-        "password": "https://dsc.gg/ajidevserver",
-        "retries": 1,
-    },
+    # 🏆 TOP VERIFIED LIVE V4 NODES (Low Latency / Asia)
     {
         "uri": "http://lavalink.jirayu.net:13592",
         "password": "youshallnotpass",
-        "retries": 1,
+        "retries": 3,
+    },
+    {
+        "uri": "https://lavalink.jirayu.net:443",
+        "password": "youshallnotpass",
+        "retries": 3,
+    },
+    {
+        "uri": "http://lava2.kasawa.pro:2334",
+        "password": "youshallnotpass",
+        "retries": 3,
+    },
+    # 🌐 Screenshot Public Nodes (Auto-Failover Pool)
+    {
+        "uri": "http://lavalinkv4.serenetia.com:80",
+        "password": "https://seretia.link/discord",
+        "retries": 2,
+    },
+    {
+        "uri": "https://lavalinkv4.serenetia.com:443",
+        "password": "https://seretia.link/discord",
+        "retries": 2,
+    },
+    {
+        "uri": "http://lava.g3v.co.uk:9008",
+        "password": "lavalinklol",
+        "retries": 2,
+    },
+    {
+        "uri": "http://omega.vexanode.cloud:2031",
+        "password": "https://discord.vexanode.cloud",
+        "retries": 2,
+    },
+    {
+        "uri": "http://lavalink.triniumhost.com:2333",
+        "password": "kirito",
+        "retries": 2,
+    },
+    {
+        "uri": "http://n3.nexcloud.in:2026",
+        "password": "nexcloud",
+        "retries": 2,
+    },
+    {
+        "uri": "http://lavav4.minecuta.com:2333",
+        "password": "discord.gg/gKuXdHs",
+        "retries": 2,
+    },
+    {
+        "uri": "http://157.254.192.15:2333",
+        "password": "youshallnotpass",
+        "retries": 2,
     },
 ]
 
@@ -4820,7 +4834,7 @@ async def add_track_to_queue(queue, track):
             pass
 
 
-def pop_next_track_from_queue(queue):
+async def pop_next_track_from_queue(queue):
     if not queue:
         return None
     try:
@@ -4835,6 +4849,12 @@ def pop_next_track_from_queue(queue):
     except Exception:
         pass
 
+    if hasattr(queue, 'get_nowait'):
+        try:
+            return queue.get_nowait()
+        except Exception:
+            pass
+
     if hasattr(queue, 'get_at') and hasattr(queue, 'delete_at'):
         try:
             track = queue.get_at(0)
@@ -4844,26 +4864,25 @@ def pop_next_track_from_queue(queue):
         except Exception:
             pass
 
-    if hasattr(queue, 'pop'):
-        try:
-            try:
-                return queue.pop(0)
-            except TypeError:
-                return queue.pop()
-        except Exception:
-            pass
-
-    if hasattr(queue, 'get_nowait'):
-        try:
-            return queue.get_nowait()
-        except Exception:
-            pass
-
     if hasattr(queue, 'get'):
         try:
             res = queue.get()
-            if not asyncio.iscoroutine(res):
+            if asyncio.iscoroutine(res):
+                return await res
+            if res:
                 return res
+        except Exception:
+            pass
+
+    if hasattr(queue, 'pop'):
+        try:
+            try:
+                res = queue.pop(0)
+            except TypeError:
+                res = queue.pop()
+            if asyncio.iscoroutine(res):
+                return await res
+            return res
         except Exception:
             pass
 
@@ -4991,6 +5010,17 @@ async def skip_cmd(ctx):
             res = vc.skip()
             if asyncio.iscoroutine(res):
                 await res
+        elif hasattr(vc, 'queue') and vc.queue:
+            next_track = await pop_next_track_from_queue(vc.queue)
+            if next_track:
+                res = vc.play(next_track)
+                if asyncio.iscoroutine(res):
+                    await res
+                return await ctx.send(f"⏭️ Skipped! Now playing: **{getattr(next_track, 'title', 'Next Track')}**")
+            else:
+                res = vc.stop()
+                if asyncio.iscoroutine(res):
+                    await res
         else:
             res = vc.stop()
             if asyncio.iscoroutine(res):
@@ -5243,14 +5273,16 @@ async def on_wavelink_track_end(payload):
         reason = getattr(payload, 'reason', '')
         if not player or not hasattr(player, 'queue'):
             return
-        if str(reason).lower() == 'replaced':
+        if str(reason).lower() in ['replaced', 'stopped']:
             return
-        if not getattr(player, 'playing', False):
-            next_track = pop_next_track_from_queue(player.queue)
-            if next_track:
-                res = player.play(next_track)
-                if asyncio.iscoroutine(res):
-                    await res
+
+        # Pop and play the next track from queue automatically
+        next_track = await pop_next_track_from_queue(player.queue)
+        if next_track:
+            res = player.play(next_track)
+            if asyncio.iscoroutine(res):
+                await res
+            print(f"🎶 [Queue Progress] Now playing next track: {getattr(next_track, 'title', 'Next Track')}")
     except Exception as exc:
         print(f"⚠️ Error in on_wavelink_track_end: {exc}")
 
@@ -5262,7 +5294,7 @@ async def on_wavelink_track_exception(payload):
         track = getattr(payload, 'track', None)
         print(f"⚠️ Track exception for '{getattr(track, 'title', 'unknown')}': {getattr(payload, 'exception', '')}")
         if player and hasattr(player, 'queue'):
-            next_track = pop_next_track_from_queue(player.queue)
+            next_track = await pop_next_track_from_queue(player.queue)
             if next_track:
                 res = player.play(next_track)
                 if asyncio.iscoroutine(res):
@@ -5276,7 +5308,7 @@ async def on_wavelink_track_stuck(payload):
     try:
         player = getattr(payload, 'player', None)
         if player and hasattr(player, 'queue'):
-            next_track = pop_next_track_from_queue(player.queue)
+            next_track = await pop_next_track_from_queue(player.queue)
             if next_track:
                 res = player.play(next_track)
                 if asyncio.iscoroutine(res):
