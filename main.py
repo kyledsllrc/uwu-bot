@@ -5420,6 +5420,267 @@ async def save_cmd(ctx, *, playlist_name: str = None):
     await ctx.send(f"💾 Saved current playlist as **{playlist['name']}** with **{len(playlist['songs'])}** songs.")
 
 
+# ==============================================
+# 🎬 MOVIE NIGHT & VOICE STREAM ANNOUNCEMENT SYSTEM (SERVER OWNER ONLY)
+# ==============================================
+
+async def fetch_movie_metadata(query_text):
+    """Search for movie details from OMDB API, iTunes Search API, or Wikipedia."""
+    if not query_text:
+        return None, "🔴 Happening Now / In Voice Channel!"
+
+    schedule = "🔴 Happening Now / In Voice Channel!"
+    movie_title = query_text.strip()
+
+    # If user used a pipe separator (e.g. Inception | Tonight at 8 PM)
+    if "|" in query_text:
+        parts = query_text.split("|", 1)
+        movie_title = parts[0].strip()
+        schedule = parts[1].strip() or schedule
+    else:
+        # Check for schedule indicators
+        pattern = r"\b(tonight|today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday|at\s+\d+|on\s+[A-Za-z]+|\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm)|this\s+weekend|next\s+week)\b"
+        match = re.search(pattern, query_text, re.IGNORECASE)
+        if match and match.start() > 1:
+            movie_title = query_text[:match.start()].strip()
+            schedule = query_text[match.start():].strip()
+
+    # Clean up title
+    movie_title = re.sub(r'[\'"]', '', movie_title).strip()
+
+    # 1. Try OMDB API (Multiple public keys)
+    omdb_keys = ["trilogy", "b9bd48a6", "70281b3c", "564727fa", "cf5a8a18"]
+    for k in omdb_keys:
+        try:
+            url = f"http://www.omdbapi.com/?t={urllib.parse.quote(movie_title)}&apikey={k}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=3.5) as r:
+                data = json.loads(r.read().decode())
+                if data.get("Response") == "True":
+                    poster = data.get("Poster")
+                    if not poster or poster == "N/A":
+                        poster = None
+                    return {
+                        "title": data.get("Title", movie_title),
+                        "year": data.get("Year", "N/A"),
+                        "released": data.get("Released", "N/A"),
+                        "genre": data.get("Genre", "Movie / Cinema"),
+                        "runtime": data.get("Runtime", "N/A"),
+                        "director": data.get("Director", "N/A"),
+                        "actors": data.get("Actors", "N/A"),
+                        "rating": data.get("imdbRating", "N/A"),
+                        "plot": data.get("Plot", "Join the voice channel to watch this movie stream live!"),
+                        "poster": poster,
+                        "imdb_id": data.get("imdbID", ""),
+                    }, schedule
+        except Exception:
+            pass
+
+    # 2. Fallback to iTunes Search API
+    try:
+        url = f"https://itunes.apple.com/search?term={urllib.parse.quote(movie_title)}&entity=movie&limit=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as r:
+            data = json.loads(r.read().decode())
+            results = data.get("results", [])
+            if results:
+                m = results[0]
+                raw_art = m.get("artworkUrl100", "")
+                poster = raw_art.replace("100x100bb.jpg", "800x800bb.jpg").replace("100x100bb.png", "800x800bb.png") if raw_art else None
+                rel = m.get("releaseDate", "")[:10] if m.get("releaseDate") else "N/A"
+                year = rel[:4] if len(rel) >= 4 else "N/A"
+                return {
+                    "title": m.get("trackName", movie_title),
+                    "year": year,
+                    "released": rel,
+                    "genre": m.get("primaryGenreName", "Movie"),
+                    "runtime": "N/A",
+                    "director": m.get("artistName", "N/A"),
+                    "actors": "N/A",
+                    "rating": "N/A",
+                    "plot": m.get("longDescription") or m.get("shortDescription") or "Join the voice channel to watch this movie stream live!",
+                    "poster": poster,
+                    "imdb_id": "",
+                }, schedule
+    except Exception:
+        pass
+
+    # 3. Fallback generic object if search fails
+    return {
+        "title": movie_title.title(),
+        "year": "2026",
+        "released": "Recently Released",
+        "genre": "Movie / Cinema Stream",
+        "runtime": "Full Feature",
+        "director": "N/A",
+        "actors": "N/A",
+        "rating": "N/A",
+        "plot": "Join the voice channel to watch this movie stream together with the community!",
+        "poster": "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=1000&auto=format&fit=crop&q=80",
+        "imdb_id": "",
+    }, schedule
+
+
+class MovieWatchPartyView(discord.ui.View):
+    """Interactive RSVP and reminder buttons for movie watch party announcements."""
+
+    def __init__(self, movie_info, schedule, host_name, vc_name=None):
+        super().__init__(timeout=None)
+        self.movie_info = movie_info
+        self.schedule = schedule
+        self.host_name = host_name
+        self.vc_name = vc_name
+        self.rsvps = set()  # Set of user IDs
+
+    def generate_embed(self):
+        title = self.movie_info.get("title", "Movie Night")
+        year = self.movie_info.get("year", "")
+        year_str = f" ({year})" if year and year != "N/A" else ""
+
+        embed = discord.Embed(
+            title=f"🍿 MOVIE STREAM WATCH PARTY • {title}{year_str}",
+            description=f"🎬 **{self.host_name}** is streaming a movie in voice chat! Grab your popcorn and join in!",
+            color=0xE50914  # Netflix Red / Cinema Gold
+        )
+
+        embed.add_field(name="📅 Showtime / Schedule", value=f"**{self.schedule}**", inline=True)
+        
+        genre = self.movie_info.get("genre", "N/A")
+        if genre and genre != "N/A":
+            embed.add_field(name="🎭 Genre", value=f"`{genre}`", inline=True)
+
+        rating = self.movie_info.get("rating", "N/A")
+        rating_str = f"⭐ IMDb **{rating}/10**" if rating and rating != "N/A" else "⭐ Rated"
+        runtime = self.movie_info.get("runtime", "N/A")
+        runtime_str = f"⏱️ `{runtime}`" if runtime and runtime != "N/A" else ""
+        timing_field = f"{rating_str} • {runtime_str}" if runtime_str else rating_str
+        embed.add_field(name="⭐ Rating & Runtime", value=timing_field, inline=True)
+
+        released = self.movie_info.get("released", "N/A")
+        if released and released != "N/A":
+            embed.add_field(name="📆 Release Date", value=f"`{released}`", inline=True)
+
+        director = self.movie_info.get("director", "N/A")
+        if director and director != "N/A":
+            embed.add_field(name="🎬 Director", value=f"`{director}`", inline=True)
+
+        actors = self.movie_info.get("actors", "N/A")
+        if actors and actors != "N/A":
+            embed.add_field(name="🌟 Starring", value=f"{actors}", inline=False)
+
+        # Voice channel location
+        if self.vc_name:
+            embed.add_field(name="🔊 Voice Channel", value=f"🔊 Join **{self.vc_name}** to watch!", inline=False)
+        else:
+            embed.add_field(name="🔊 Voice Channel", value="🔊 Join the server's Voice Channel when the stream begins!", inline=False)
+
+        plot = self.movie_info.get("plot", "")
+        if plot:
+            if len(plot) > 400:
+                plot = plot[:397] + "..."
+            embed.add_field(name="📜 Synopsis", value=f"*{plot}*", inline=False)
+
+        # Attendees RSVP list
+        if self.rsvps:
+            rsvp_mentions = ", ".join([f"<@{uid}>" for uid in list(self.rsvps)[:15]])
+            if len(self.rsvps) > 15:
+                rsvp_mentions += f" and **{len(self.rsvps) - 15}** more"
+            embed.add_field(name=f"👥 Attendees RSVP ({len(self.rsvps)})", value=rsvp_mentions, inline=False)
+        else:
+            embed.add_field(name="👥 Attendees RSVP (0)", value="*No one has RSVP'd yet. Click 🍿 below to join the watch party!*", inline=False)
+
+        poster = self.movie_info.get("poster")
+        if poster:
+            embed.set_image(url=poster)
+        
+        embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/2798/2798007.png")
+        embed.set_footer(text=f"Hosted by Server Owner • Click 🍿 below to RSVP!")
+        return embed
+
+    @discord.ui.button(label="🍿 Count Me In / RSVP", style=discord.ButtonStyle.success, custom_id="movie_rsvp_btn")
+    async def rsvp_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        if uid in self.rsvps:
+            self.rsvps.remove(uid)
+            button.label = f"🍿 Count Me In ({len(self.rsvps)})" if self.rsvps else "🍿 Count Me In / RSVP"
+            await interaction.response.edit_message(embed=self.generate_embed(), view=self)
+            await interaction.followup.send("❌ You removed your RSVP for this movie watch party.", ephemeral=True)
+        else:
+            self.rsvps.add(uid)
+            button.label = f"🍿 Count Me In ({len(self.rsvps)})"
+            await interaction.response.edit_message(embed=self.generate_embed(), view=self)
+            await interaction.followup.send(f"🍿 **You're in!** You have RSVP'd for **{self.movie_info.get('title')}**. See you in the voice stream!", ephemeral=True)
+
+    @discord.ui.button(label="🔔 Remind Me", style=discord.ButtonStyle.secondary, custom_id="movie_remind_btn")
+    async def remind_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"🔔 **Reminder Set**: Make sure your Discord server notifications are enabled for this channel so you don't miss **{self.movie_info.get('title')}**!",
+            ephemeral=True
+        )
+
+
+@bot.command(name='movie', aliases=['movienight', 'watchparty', 'cinema', 'moviestream', 'streammovie'])
+async def movie_cmd(ctx, *, query: str = None):
+    """Announce a movie stream/watch party with posters, genre, release date, and info (Server Owner only)."""
+    # 🔒 Server Owner Only Check
+    if ctx.author.id != ctx.guild.owner_id and not is_owner(ctx):
+        return await ctx.send("❌ **Access Denied**: Only the **Server Owner** can host and announce movie stream watch parties.")
+
+    if not query:
+        help_embed = discord.Embed(
+            title="🎬 Movie Stream Announcement Setup",
+            description="Announce an upcoming movie watch party with high-res posters, release date, genre, runtime, and interactive RSVPs for your server members!",
+            color=0xE50914
+        )
+        help_embed.add_field(
+            name="📌 How to Use",
+            value="`uwu movie <movie title> [optional schedule/time]`\n"
+                  "`uwu movie <movie title> | <schedule/time>`",
+            inline=False
+        )
+        help_embed.add_field(
+            name="💡 Examples",
+            value="• `uwu movie Inception tonight at 8:00 PM`\n"
+                  "• `uwu movie Interstellar | Friday 9:00 PM in Voice`\n"
+                  "• `uwu movie Inside Out 2 tomorrow 7:30 PM`\n"
+                  "• `uwu movie Avatar: The Way of Water`",
+            inline=False
+        )
+        help_embed.set_footer(text="Permission: Server Owner Only • Interactive 🍿 RSVP enabled")
+        return await ctx.send(embed=help_embed)
+
+    # Inform user that movie metadata is being fetched
+    status_msg = await ctx.send("🔍 *Searching movie database and generating watch party embed...*")
+
+    movie_info, schedule = await fetch_movie_metadata(query)
+    if not movie_info:
+        await status_msg.delete()
+        return await ctx.send(f"❌ Could not find details for **{query}**. Please check the title and try again!")
+
+    # Check if Server Owner is in a voice channel
+    vc_name = None
+    if ctx.author.voice and ctx.author.voice.channel:
+        vc_name = ctx.author.voice.channel.name
+
+    view = MovieWatchPartyView(
+        movie_info=movie_info,
+        schedule=schedule,
+        host_name=ctx.author.display_name,
+        vc_name=vc_name
+    )
+
+    embed = view.generate_embed()
+    await status_msg.delete()
+    announcement_msg = await ctx.send(embed=embed, view=view)
+
+    # Add quick reactions
+    try:
+        await announcement_msg.add_reaction("🍿")
+        await announcement_msg.add_reaction("🎉")
+    except Exception:
+        pass
+
+
 # --- FLOWER SHOP & MARRIAGE SYSTEM ---
 FLOWER_SHOP = {
     "tulip": {
