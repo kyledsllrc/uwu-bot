@@ -5681,6 +5681,362 @@ async def movie_cmd(ctx, *, query: str = None):
         pass
 
 
+# ==============================================
+# 📊 INTERACTIVE COMMUNITY POLL & VOTING SYSTEM (MAX 20 CHOICES)
+# ==============================================
+
+POLL_NUMBER_EMOJIS = [
+    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
+    "1️⃣1️⃣", "1️⃣2️⃣", "1️⃣3️⃣", "1️⃣4️⃣", "1️⃣5️⃣", "1️⃣6️⃣", "1️⃣7️⃣", "1️⃣8️⃣", "1️⃣9️⃣", "2️⃣0️⃣"
+]
+
+POLL_OPTION_ICONS = [
+    "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟",
+    "🔹", "🔹", "🔹", "🔹", "🔹", "🔹", "🔹", "🔹", "🔹", "🔹"
+]
+
+def format_poll_bar(percent, width=10):
+    filled = int(round(percent / 100.0 * width))
+    filled = max(0, min(width, filled))
+    empty = width - filled
+    return "█" * filled + "░" * empty
+
+def parse_poll_duration(text):
+    if not text:
+        return None
+    text = text.strip().lower()
+    m = re.search(r'(\d+)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|day|days?|w|week|weeks?)\b', text)
+    if m:
+        val = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith('s'):
+            return max(5, val)
+        elif unit.startswith('m'):
+            return val * 60
+        elif unit.startswith('h'):
+            return val * 3600
+        elif unit.startswith('d'):
+            return val * 86400
+        elif unit.startswith('w'):
+            return val * 604800
+    return None
+
+def parse_poll_arguments(raw_text):
+    if not raw_text:
+        return None, [], None
+
+    raw_text = raw_text.strip()
+    question = "Community Poll"
+    choices = []
+    duration = None
+
+    if "|" in raw_text:
+        parts = [p.strip() for p in raw_text.split("|") if p.strip()]
+        if len(parts) == 1:
+            raw_choices = parts[0]
+        elif len(parts) == 2:
+            dur_test = parse_poll_duration(parts[1])
+            if dur_test is not None:
+                raw_choices = parts[0]
+                duration = dur_test
+            else:
+                question = parts[0]
+                raw_choices = parts[1]
+        else:
+            question = parts[0]
+            raw_choices = parts[1]
+            duration = parse_poll_duration(parts[2])
+    else:
+        dur_match = re.search(r'(?:in|for|duration:?|--)\s+(\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hr|hours?|d|days?))\s*$', raw_text, re.IGNORECASE)
+        if dur_match:
+            duration = parse_poll_duration(dur_match.group(1))
+            raw_text = raw_text[:dur_match.start()].strip()
+
+        if "?" in raw_text:
+            q_part, c_part = raw_text.split("?", 1)
+            question = q_part.strip() + "?"
+            raw_choices = c_part.strip()
+        else:
+            raw_choices = raw_text
+
+    if "," in raw_choices:
+        choices = [c.strip() for c in raw_choices.split(",") if c.strip()]
+    elif ";" in raw_choices:
+        choices = [c.strip() for c in raw_choices.split(";") if c.strip()]
+    elif "\n" in raw_choices:
+        choices = [c.strip() for c in raw_choices.split("\n") if c.strip()]
+    elif "/" in raw_choices:
+        choices = [c.strip() for c in raw_choices.split("/") if c.strip()]
+    else:
+        choices = [c.strip() for c in raw_choices.split() if c.strip()]
+
+    # Limit to max 20 choices
+    choices = choices[:20]
+    return question, choices, duration
+
+
+class PollSelect(discord.ui.Select):
+    def __init__(self, choices):
+        options = []
+        for i, choice_text in enumerate(choices):
+            clean_label = choice_text[:85] if len(choice_text) > 85 else choice_text
+            emoji_icon = POLL_OPTION_ICONS[i] if i < len(POLL_OPTION_ICONS) else "🔹"
+            options.append(
+                discord.SelectOption(
+                    label=f"#{i+1}: {clean_label}",
+                    value=str(i),
+                    description=f"Cast your vote for Option {i+1}",
+                    emoji=emoji_icon
+                )
+            )
+
+        super().__init__(
+            placeholder="🗳️ Select a choice to cast your vote...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="poll_select_menu"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view: PollView = self.view
+        if view.is_ended:
+            return await interaction.response.send_message("❌ This poll has already ended!", ephemeral=True)
+
+        user_id = interaction.user.id
+        choice_idx = int(self.values[0])
+        choice_name = view.choices[choice_idx]
+
+        view.votes[user_id] = choice_idx
+
+        # Update poll embed
+        embed = view.generate_embed(is_final=False)
+        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.followup.send(f"✅ **Vote Recorded!** You voted for **#{choice_idx+1}: {choice_name}**.", ephemeral=True)
+
+
+class PollView(discord.ui.View):
+    """Interactive real-time community poll view supporting up to 20 choices."""
+
+    def __init__(self, question, choices, author_id, duration=None, channel_id=None):
+        super().__init__(timeout=None)
+        self.question = question
+        self.choices = choices
+        self.author_id = author_id
+        self.duration = duration
+        self.channel_id = channel_id
+        self.created_at = time.time()
+        self.ends_at = self.created_at + duration if duration else None
+        self.votes = {}  # {user_id: choice_idx}
+        self.is_ended = False
+        self.message = None
+
+        # Add select menu for all choices
+        self.select_menu = PollSelect(choices)
+        self.add_item(self.select_menu)
+
+    def calculate_results(self):
+        counts = [0] * len(self.choices)
+        for uid, c_idx in self.votes.items():
+            if 0 <= c_idx < len(self.choices):
+                counts[c_idx] += 1
+        total_votes = len(self.votes)
+        return counts, total_votes
+
+    def generate_embed(self, is_final=False):
+        counts, total_votes = self.calculate_results()
+
+        # Find leader or winner
+        max_votes = max(counts) if counts else 0
+        winners = [i for i, c in enumerate(counts) if c == max_votes and max_votes > 0]
+
+        if is_final:
+            embed = discord.Embed(
+                title=f"🏆 POLL CONCLUDED • {self.question}",
+                color=0xF1C40F  # Gold
+            )
+            if total_votes == 0:
+                embed.description = "⏱️ *This poll ended with 0 total votes.*"
+            elif len(winners) == 1:
+                w_name = self.choices[winners[0]]
+                w_pct = (counts[winners[0]] / total_votes * 100) if total_votes > 0 else 0
+                embed.description = f"🎉 **WINNER:** 👑 **{w_name}** with **{counts[winners[0]]} votes ({w_pct:.1f}%)**!"
+            else:
+                w_names = ", ".join([f"**{self.choices[w]}**" for w in winners])
+                embed.description = f"🤝 **TIE BETWEEN:** {w_names} with **{max_votes} votes each**!"
+        else:
+            embed = discord.Embed(
+                title=f"📊 COMMUNITY POLL • {self.question}",
+                description="Vote using the dropdown menu below! You can change or clear your vote anytime.",
+                color=0x5865F2  # Discord Blurple
+            )
+
+        # Build visual bars for all choices
+        lines = []
+        for i, choice_text in enumerate(self.choices):
+            count = counts[i]
+            pct = (count / total_votes * 100) if total_votes > 0 else 0.0
+            bar = format_poll_bar(pct, width=10)
+            emoji_tag = POLL_NUMBER_EMOJIS[i] if i < len(POLL_NUMBER_EMOJIS) else f"`{i+1}.`"
+            
+            # Add crown next to leader if votes exist
+            crown = " 👑" if (i in winners and max_votes > 0) else ""
+            lines.append(f"{emoji_tag} **{choice_text}**{crown}\n`[{bar}]` **{pct:.1f}%** ({count} votes)")
+
+        # Group lines cleanly into fields
+        chunk_size = 5
+        for idx in range(0, len(lines), chunk_size):
+            chunk = lines[idx:idx+chunk_size]
+            field_name = f"Options ({idx+1} - {min(idx+chunk_size, len(lines))})" if len(lines) > chunk_size else "Options & Live Standings"
+            embed.add_field(name=field_name, value="\n\n".join(chunk), inline=False)
+
+        # Footer & Status
+        if is_final:
+            embed.set_footer(text=f"Total Votes: {total_votes} • Poll Concluded")
+        else:
+            time_str = f" • ⏳ Ends: <t:{int(self.ends_at)}:R>" if self.ends_at else " • ⏳ Open until closed"
+            embed.add_field(name="📈 Summary", value=f"👥 **Total Votes:** {total_votes}{time_str}", inline=False)
+            embed.set_footer(text=f"Created by Server Member • Max 20 choices supported")
+
+        return embed
+
+    @discord.ui.button(label="🗑️ Clear My Vote", style=discord.ButtonStyle.secondary, custom_id="poll_clear_btn", row=1)
+    async def clear_vote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.is_ended:
+            return await interaction.response.send_message("❌ This poll has already ended!", ephemeral=True)
+
+        user_id = interaction.user.id
+        if user_id in self.votes:
+            del self.votes[user_id]
+            embed = self.generate_embed(is_final=False)
+            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.followup.send("🗑️ Your vote has been removed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("ℹ️ You haven't cast a vote in this poll yet.", ephemeral=True)
+
+    @discord.ui.button(label="🛑 End Poll Now", style=discord.ButtonStyle.danger, custom_id="poll_end_btn", row=1)
+    async def end_poll_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only poll creator, server owner, bot owner, or users with Manage Messages can end
+        is_creator = interaction.user.id == self.author_id
+        is_server_owner = interaction.guild and interaction.user.id == interaction.guild.owner_id
+        is_bot_admin = is_owner(interaction)
+        has_perm = interaction.user.guild_permissions.manage_messages if (interaction.guild and hasattr(interaction.user, 'guild_permissions')) else False
+
+        if not (is_creator or is_server_owner or is_bot_admin or has_perm):
+            return await interaction.response.send_message("❌ Only the poll creator or a server moderator can end this poll early.", ephemeral=True)
+
+        await self.finalize_poll(interaction)
+
+    async def finalize_poll(self, interaction: discord.Interaction = None):
+        if self.is_ended:
+            return
+        self.is_ended = True
+
+        # Disable all controls
+        for item in self.children:
+            item.disabled = True
+
+        final_embed = self.generate_embed(is_final=True)
+
+        if interaction and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=final_embed, view=self)
+        elif self.message:
+            try:
+                await self.message.edit(embed=final_embed, view=self)
+            except Exception:
+                pass
+
+        # Send public conclusion message in channel
+        counts, total_votes = self.calculate_results()
+        max_votes = max(counts) if counts else 0
+        winners = [i for i, c in enumerate(counts) if c == max_votes and max_votes > 0]
+
+        if self.message and self.message.channel:
+            if total_votes == 0:
+                announcement = f"📊 The poll **\"{self.question}\"** has ended with **0 votes**."
+            elif len(winners) == 1:
+                w_name = self.choices[winners[0]]
+                pct = (counts[winners[0]] / total_votes * 100)
+                announcement = f"🎉 The poll **\"{self.question}\"** has concluded!\n🏆 **Winner:** **{w_name}** with **{counts[winners[0]]} votes ({pct:.1f}%)**!"
+            else:
+                w_names = ", ".join([f"**{self.choices[w]}**" for w in winners])
+                announcement = f"🎉 The poll **\"{self.question}\"** has concluded in a **TIE** between {w_names} with **{max_votes} votes each**!"
+
+            try:
+                await self.message.channel.send(announcement)
+            except Exception:
+                pass
+
+    async def timer_loop(self, delay):
+        await asyncio.sleep(delay)
+        if not self.is_ended:
+            await self.finalize_poll()
+
+
+@bot.command(name="poll", aliases=["vote", "createpoll", "surveypoll"])
+async def poll_cmd(ctx, *, raw_args: str = None):
+    """Create an interactive real-time poll with up to 20 choices and optional timer/duration."""
+    if is_category_disabled(ctx.guild, 'social'):
+        return await ctx.send("**Social commands are disabled in this channel.**")
+
+    if not raw_args:
+        help_embed = discord.Embed(
+            title="📊 Community Poll & Voting System",
+            description="Create interactive polls with live visual progress bars, single-vote tracking, and automatic timers!",
+            color=0x5865F2
+        )
+        help_embed.add_field(
+            name="📌 Syntax Options (Up to 20 Choices)",
+            value="• `uwu poll <choice1, choice2, choice3...>`\n"
+                  "• `uwu poll <Question> | <choice1, choice2, choice3...> | [duration]`\n"
+                  "• `uwu poll <Question?> <choice1, choice2, choice3...> for [duration]`",
+            inline=False
+        )
+        help_embed.add_field(
+            name="💡 Examples",
+            value="• `uwu poll the, ba, ca`\n"
+                  "• `uwu poll Favorite Food? Pizza, Burger, Tacos, Ramen`\n"
+                  "• `uwu poll What game to play? | Valorant, Roblox, Minecraft, Genshin | 30m`\n"
+                  "• `uwu poll Should we host a movie night? | Yes, No | 2h`\n"
+                  "• `uwu poll Best Anime | One Piece, Naruto, Bleach, Attack on Titan, JJK | 1d`",
+            inline=False
+        )
+        help_embed.add_field(
+            name="⚙️ Features",
+            value="• **Max 20 Choices**: Supports from 2 up to 20 options per poll.\n"
+                  "• **Live Visual Bars**: Real-time `[██████░░░░]` percentage progress.\n"
+                  "• **Vote Switching**: Users can change or clear their vote anytime.\n"
+                  "• **Auto-End Timer**: Set `30s`, `10m`, `1h`, `24h`, `2d`, etc.",
+            inline=False
+        )
+        help_embed.set_footer(text="UwU Bot Polls • Interactive Discord UI")
+        return await ctx.send(embed=help_embed)
+
+    question, choices, duration = parse_poll_arguments(raw_args)
+
+    if not choices or len(choices) < 2:
+        return await ctx.send("❌ **Invalid Poll**: You must provide at least **2 choices** (e.g. `uwu poll the, ba, ca` or `uwu poll Question | Option 1, Option 2`).")
+
+    if len(choices) > 20:
+        choices = choices[:20]
+
+    view = PollView(
+        question=question,
+        choices=choices,
+        author_id=ctx.author.id,
+        duration=duration,
+        channel_id=ctx.channel.id
+    )
+
+    embed = view.generate_embed(is_final=False)
+    poll_msg = await ctx.send(embed=embed, view=view)
+    view.message = poll_msg
+
+    # If duration set, start background timer
+    if duration and duration > 0:
+        asyncio.create_task(view.timer_loop(duration))
+
+
 # --- FLOWER SHOP & MARRIAGE SYSTEM ---
 FLOWER_SHOP = {
     "tulip": {
@@ -25161,6 +25517,7 @@ async def help_cmd(ctx, category: str = None):
                 ("slap", "@user — slap a user"),
                 ("rant", "[on|off|text] — toggle AI emotional support or vent problem"),
                 ("vent", "<problem> — share a problem to receive AI comfort in your language"),
+                ("poll", "<choices> | [time] — create interactive community poll (up to 20 choices) with live bars & timer"),
             ],
         },
         "music": {
@@ -25185,6 +25542,7 @@ async def help_cmd(ctx, category: str = None):
             "title": "🛡️ Moderation & Server Protection",
             "aliases": ["mod"],
             "items": [
+                ("poll", "<choices> | [time] — create interactive community poll (up to 20 choices)"),
                 ("movie", "<title> [schedule] — host & announce movie night stream with poster & RSVP (Owner only)"),
                 ("kick", "@user [reason] — kick member"),
                 ("ban", "@user [reason] — ban member"),
