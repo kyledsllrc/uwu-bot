@@ -20697,6 +20697,16 @@ class VerifyButtonView(discord.ui.View):
             )
             # Log action
             await log_moderation_action(guild, f"🛡️ **Member Verified:** {member.mention} (`{member.id}`) clicked Verify First and received **@{target_role.name}**.")
+
+            # Automatically delete/vanish the individual join verification prompt if this message was a welcome prompt
+            try:
+                msg = interaction.message
+                if msg and msg.id != settings.get("verify_message_id"):
+                    # Delete the per-user prompt after a brief moment so the channel stays completely clean
+                    await asyncio.sleep(1)
+                    await msg.delete()
+            except Exception:
+                pass
         except discord.Forbidden:
             await interaction.response.send_message(
                 f"❌ The bot lacks permission to assign **@{target_role.name}**. Please check bot permissions and role hierarchy.",

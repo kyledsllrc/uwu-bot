@@ -1,5 +1,0 @@
-discord.py
-firebase-admin
-requests
-aiohttp
-wavelink
