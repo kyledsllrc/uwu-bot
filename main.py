@@ -31,16 +31,21 @@ import urllib.parse
 import urllib.request
 import firebase_admin
 from firebase_admin import credentials, db
-from dotenv import load_dotenv
-import wavelink
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    import wavelink
+except ImportError:
+    wavelink = None
 
 try:
     import yt_dlp
 except ImportError:
     yt_dlp = None
-
-# Hosts that expose secrets as a .env file rather than real environment variables.
-load_dotenv()
 
 # --- BOT OWNER ID ---
 BOT_OWNER_ID = "906461875221434428"
