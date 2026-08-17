@@ -1,13 +1,5 @@
-discord.py[voice]
-flask
+discord.py
 firebase-admin
 google-cloud-firestore
 requests
 aiohttp
-pytest
-yt-dlp
-spotipy
-beautifulsoup4
-PyNaCl
-davey
-wavelink

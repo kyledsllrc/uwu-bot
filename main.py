@@ -1,16 +1,19 @@
 # ==============================================
 # KEEP-ALIVE FOR 24/7 REPLIT & BOT-HOSTING
 # ==============================================
-from flask import Flask
 import threading
-app = Flask(__name__)
-@app.route('/')
-@app.route('/api')
-@app.route('/api/')
-@app.route('/health')
-@app.route('/ping')
-@app.route('/status')
-def keep_alive(): return "UwU Bot is 24/7 online & running!", 200
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"UwU Bot is 24/7 online & running!")
+
+    def log_message(self, format, *args):
+        # Suppress noisy keep-alive access logs
+        pass
 
 # ==============================================
 # BOT SETUP & IMPORTS
@@ -27434,7 +27437,8 @@ def start_keep_alive():
 
     def serve():
         try:
-            app.run(host="0.0.0.0", port=port, use_reloader=False)
+            httpd = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+            httpd.serve_forever()
         except OSError as exc:
             # The bot itself does not need this endpoint, so a busy or
             # unavailable port must not take the process down.
