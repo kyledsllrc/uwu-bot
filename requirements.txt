@@ -1,5 +1,4 @@
 discord.py
 firebase-admin
-google-cloud-firestore
 requests
 aiohttp
