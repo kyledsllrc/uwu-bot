@@ -21471,11 +21471,14 @@ async def paytax(ctx):
 
     # Deduct 10q: prioritize wallet first, then bank
     tax_to_deduct = WEALTH_TAX_AMOUNT
-    from_wallet = min(int(user.get("wallet", 0)), tax_to_deduct)
-    user["wallet"] = max(0, int(user.get("wallet", 0)) - from_wallet)
+    current_wallet = int(user.get("wallet", 0))
+    current_bank = int(user.get("bank", 0))
+
+    from_wallet = min(current_wallet, tax_to_deduct)
+    user["wallet"] = max(0, current_wallet - from_wallet)
     remainder = tax_to_deduct - from_wallet
     if remainder > 0:
-        user["bank"] = max(0, int(user.get("bank", 0)) - remainder)
+        user["bank"] = max(0, current_bank - remainder)
 
     user["last_tax_paid"] = now
     add_history(user, {
