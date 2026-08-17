@@ -1,6 +1,6 @@
 {
-  "name": "UwU Bot Workspace",
-  "description": "GitHub repository editor and dashboard for UwU Bot (https://github.com/kyledsllrc/uwu-bot)",
+  "name": "UwU Bot Official Web Dashboard",
+  "description": "Official Web Dashboard & Command Center for UwU Bot — featuring live economy data, crypto market tracker, command directory, 20-choice poll visualizer, movie stream announcements, and casino simulator.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

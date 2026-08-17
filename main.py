@@ -509,8 +509,8 @@ GAME_BET_LIMITS = load_game_bet_limits()
 
 DEFAULT_ECONOMY_SETTINGS = {
     "jackpot": 10_000,
-    "max_bet_percent": 25.0,
-    "bet_cap_enabled": True,
+    "max_bet_percent": 0.0,
+    "bet_cap_enabled": False,
     "claim_reward": 500_000_000_000,
 }
 
@@ -530,8 +530,8 @@ def load_economy_settings():
             except (TypeError, ValueError):
                 pass
             if legacy_cap_settings:
-                settings["max_bet_percent"] = DEFAULT_ECONOMY_SETTINGS["max_bet_percent"]
-                settings["bet_cap_enabled"] = True
+                settings["max_bet_percent"] = 0.0
+                settings["bet_cap_enabled"] = False
             else:
                 try:
                     settings["max_bet_percent"] = max(
@@ -539,7 +539,7 @@ def load_economy_settings():
                     )
                 except (TypeError, ValueError):
                     pass
-                settings["bet_cap_enabled"] = bool(stored.get("bet_cap_enabled", True))
+                settings["bet_cap_enabled"] = bool(stored.get("bet_cap_enabled", False))
         else:
             ECONOMY_REF.set(settings)
         return settings
@@ -1119,6 +1119,27 @@ def migrate_unheld_crypto_positions(data):
             changed = True
     return changed
 
+def sanitize_for_firebase(data):
+    """
+    Recursively converts values so they are 100% compliant with Firebase Realtime Database
+    and JSON limits, allowing arbitrarily large/unlimited balances without Firebase 400 errors.
+    Firebase Realtime Database REST API has a 64-bit signed integer limit (-2^63 to 2^63 - 1).
+    Integers beyond this range are converted to float (supporting numbers up to ~1.79e308).
+    """
+    if isinstance(data, dict):
+        return {str(k): sanitize_for_firebase(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_for_firebase(v) for v in data]
+    elif isinstance(data, int):
+        if data > 9223372036854775807 or data < -9223372036854775808:
+            return float(data)
+        return data
+    elif isinstance(data, float):
+        if data != data or data == float('inf') or data == float('-inf'):
+            return 0.0
+        return data
+    return data
+
 def save_local_backup(data):
     temp_file = f"{DATA_FILE}.tmp"
     with open(temp_file, "w", encoding="utf-8") as f:
@@ -1135,7 +1156,7 @@ def load_data():
             changed = migrate_legacy_currency_fields(data)
             changed = migrate_unheld_crypto_positions(data) or changed
             if changed:
-                db_ref.set(data)
+                db_ref.set(sanitize_for_firebase(data))
                 save_local_backup(data)
             return data
 
@@ -1144,7 +1165,7 @@ def load_data():
         if local_data:
             migrate_legacy_currency_fields(local_data)
             migrate_unheld_crypto_positions(local_data)
-            db_ref.set(local_data)
+            db_ref.set(sanitize_for_firebase(local_data))
             save_local_backup(local_data)
             return local_data
         return {}
@@ -1157,22 +1178,20 @@ def save_data(data):
         data = DATA
     with DATA_LOCK:
         try:
-            db_ref.set(data)
+            sanitized = sanitize_for_firebase(data)
+            db_ref.set(sanitized)
             save_local_backup(data)
             if "ECONOMY_SETTINGS" in globals():
-                ECONOMY_REF.set(ECONOMY_SETTINGS)
+                ECONOMY_REF.set(sanitize_for_firebase(ECONOMY_SETTINGS))
         except Exception as exc:
-            # Never leave a failed mutation visible only in memory. Reload the
-            # last committed Firebase state so a later balance command cannot
-            # report coins that were not actually saved.
+            # Keep local backup safe
+            save_local_backup(data)
             try:
-                committed = db_ref.get()
-                DATA.clear()
-                if isinstance(committed, dict):
-                    DATA.update(committed)
-                save_local_backup(DATA)
-            except Exception as rollback_exc:
-                print(f"⚠️ Could not restore committed Firebase state: {rollback_exc}")
+                # Retry with sanitize
+                db_ref.set(sanitize_for_firebase(data))
+                return
+            except Exception as retry_exc:
+                print(f"⚠️ Firebase sync retry failed: {retry_exc}")
             raise RuntimeError(f"Firebase write failed: {exc}") from exc
 
 # Keep one in-memory copy for the lifetime of the bot. Commands mutate this
@@ -1386,9 +1405,19 @@ def get_guild_moderation_settings(guild):
             "modlog_channel": None,
             "welcome_channel": None,
             "whitelist": [],
+            "verification_enabled": False,
+            "verify_role_id": None,
+            "verify_channel_id": None,
+            "verify_message_id": None,
+            "verify_dm_welcome": True,
         }
     else:
         moderation[guild_id].setdefault("welcome_channel", None)
+        moderation[guild_id].setdefault("verification_enabled", False)
+        moderation[guild_id].setdefault("verify_role_id", None)
+        moderation[guild_id].setdefault("verify_channel_id", None)
+        moderation[guild_id].setdefault("verify_message_id", None)
+        moderation[guild_id].setdefault("verify_dm_welcome", True)
     return moderation[guild_id]
 
 
@@ -13938,7 +13967,15 @@ def _sandbox2020():
 # ==============================================
 
 def format_coins(amount):
-    return f"{int(amount):,}"
+    try:
+        val = int(amount)
+        return f"{val:,}"
+    except (TypeError, ValueError, OverflowError):
+        try:
+            val = int(float(amount))
+            return f"{val:,}"
+        except Exception:
+            return str(amount)
 
 def get_effective_wallet(user):
     """Return user's wallet + partner's wallet if married."""
@@ -13991,12 +14028,84 @@ def debit_wallet(user, amount):
             partner["wallet"] = max(0, partner.get("wallet", 0) - remainder)
     return True
 
+TRANSFER_TAX_RATE = 0.20  # 20% deduction when sending money
+WEALTH_TAX_THRESHOLD = 50_000_000_000_000_000  # 50q
+WEALTH_TAX_AMOUNT = 10_000_000_000_000_000     # 10q
+TAX_CYCLE_SECONDS = 43200                      # 12 hours
+
+ATM_DEDUCTION_THRESHOLD = 1_000_000_000_000_000  # 1q
+ATM_DEDUCTION_AMOUNT = 5_000_000_000_000_000     # 5q
+ATM_CYCLE_SECONDS = 43200                        # 12 hours
+
+def is_wealth_tax_due(user):
+    """Returns True if user has 50q+ total wealth and hasn't paid tax within the last 12 hours."""
+    total_balance = int(user.get("wallet", 0)) + int(user.get("bank", 0))
+    if total_balance < WEALTH_TAX_THRESHOLD:
+        return False
+    last_paid = float(user.get("last_tax_paid", 0) or 0)
+    return (time.time() - last_paid) >= TAX_CYCLE_SECONDS
+
+def get_wealth_tax_block_message(user):
+    """Message explaining why user cannot play games until paying tax."""
+    total_balance = int(user.get("wallet", 0)) + int(user.get("bank", 0))
+    return (
+        f"🏛️ **Wealth Tax Required to Play!**\n"
+        f"Your total balance is **{format_coins(total_balance)} uwuncy** (50q+).\n"
+        f"Players holding **50q+ uwuncy** must pay the 12-hour economy tax of **10q uwuncy** using `uwu paytax` to unlock all games!\n"
+        f"👉 Run `uwu paytax` now to pay **10q** and unlock gameplay for the next **12 hours**."
+    )
+
+def apply_atm_deductions(user):
+    """
+    Apply 5q deduction every 12 hours for ATM accounts holding quadrillions (>= 1q).
+    Returns total coins deducted across all 5 ATM slots.
+    """
+    now = time.time()
+    total_deducted = 0
+    normalize_user(user)
+    atm_accounts = user.get("atm_accounts", {})
+
+    for slot_id, slot_data in atm_accounts.items():
+        balance = int(slot_data.get("balance", 0))
+        if balance <= 0:
+            slot_data["last_deduction"] = now
+            continue
+
+        last_deduction = float(slot_data.get("last_deduction", 0) or now)
+        elapsed = now - last_deduction
+
+        if elapsed >= ATM_CYCLE_SECONDS:
+            cycles = int(elapsed // ATM_CYCLE_SECONDS)
+            if balance >= ATM_DEDUCTION_THRESHOLD:
+                cost_per_cycle = ATM_DEDUCTION_AMOUNT
+                total_cost = min(balance, cost_per_cycle * cycles)
+                slot_data["balance"] = max(0, balance - total_cost)
+                total_deducted += total_cost
+            slot_data["last_deduction"] = now - (elapsed % ATM_CYCLE_SECONDS)
+
+    if total_deducted > 0:
+        add_history(user, {
+            "type": "atm_deduction",
+            "result": "fee",
+            "amount": -total_deducted,
+            "timestamp": int(now),
+        })
+        save_data(DATA)
+
+    return total_deducted
+
+def get_user_total_atm_balance(user):
+    normalize_user(user)
+    return sum(int(slot.get("balance", 0)) for slot in user.get("atm_accounts", {}).values())
+
 def transfer_wallet(sender, receiver, amount):
-    """Move wallet coins atomically between normalized users."""
+    """Move wallet coins between users with a 20% transfer tax deduction."""
     amount = int(amount)
     if amount <= 0 or not debit_wallet(sender, amount):
         return False
-    credit_wallet(receiver, amount)
+    tax_deduction = int(amount * TRANSFER_TAX_RATE)
+    received_amount = max(0, amount - tax_deduction)
+    credit_wallet(receiver, received_amount)
     return True
 
 def debit_available_balance(user, amount):
@@ -14213,6 +14322,8 @@ def game_bet_limit_message(game, bet):
 
 
 def validate_bet(user, bet, game=None):
+    if is_wealth_tax_due(user):
+        return get_wealth_tax_block_message(user)
     if bet <= 0:
         return "Bet must be greater than zero."
     if game:
@@ -14250,8 +14361,10 @@ def apply_bank_interest(user):
     return earned
 
 def bet_limit_message(user, bet):
-    percent = ECONOMY_SETTINGS.get("max_bet_percent", 0)
-    if not ECONOMY_SETTINGS.get("bet_cap_enabled", True) or percent <= 0:
+    if not ECONOMY_SETTINGS.get("bet_cap_enabled", False):
+        return None
+    percent = float(ECONOMY_SETTINGS.get("max_bet_percent", 0.0))
+    if percent <= 0.0 or percent >= 100.0:
         return None
     limit = int(get_effective_wallet(user) * percent / 100)
     if bet > limit:
@@ -14281,7 +14394,14 @@ def jackpot_payout(user, game, bet):
 
 def normalize_user(user):
     """Keep older Firebase accounts compatible with the current economy schema."""
-    user.setdefault("wallet", 0)
+    try:
+        user["wallet"] = max(0, int(float(user.get("wallet", 0))))
+    except (TypeError, ValueError, OverflowError):
+        user["wallet"] = 0
+    try:
+        user["bank"] = max(0, int(float(user.get("bank", 0))))
+    except (TypeError, ValueError, OverflowError):
+        user["bank"] = 0
     user.setdefault("last_booster_claim", 0)
     if not isinstance(user.get("booster_passes"), dict):
         user["booster_passes"] = {}
@@ -14289,6 +14409,7 @@ def normalize_user(user):
     user.setdefault("birthday", "")
     user.setdefault("bank", 0)
     user.setdefault("last_daily", 0)
+    user.setdefault("last_tax_paid", 0)
     user.setdefault("last_hunt", 0)
     user.setdefault("hunt_level", 1)
     user.setdefault("hunt_total", 0)
@@ -14325,6 +14446,26 @@ def normalize_user(user):
     user["crypto_private"] = bool(user.get("crypto_private", False))
     user["marriage_private"] = bool(user.get("marriage_private", False))
     user["bank_private"] = bool(user.get("bank_private", False))
+    if not isinstance(user.get("atm_accounts"), dict):
+        user["atm_accounts"] = {
+            "1": {"balance": 0, "last_deduction": time.time(), "name": "Primary ATM"},
+            "2": {"balance": 0, "last_deduction": time.time(), "name": "ATM Vault 2"},
+            "3": {"balance": 0, "last_deduction": time.time(), "name": "ATM Vault 3"},
+            "4": {"balance": 0, "last_deduction": time.time(), "name": "ATM Vault 4"},
+            "5": {"balance": 0, "last_deduction": time.time(), "name": "ATM Vault 5"},
+        }
+    else:
+        for slot in ["1", "2", "3", "4", "5"]:
+            if slot not in user["atm_accounts"] or not isinstance(user["atm_accounts"][slot], dict):
+                user["atm_accounts"][slot] = {
+                    "balance": 0,
+                    "last_deduction": time.time(),
+                    "name": f"ATM Account {slot}",
+                }
+            else:
+                user["atm_accounts"][slot].setdefault("balance", 0)
+                user["atm_accounts"][slot].setdefault("last_deduction", time.time())
+                user["atm_accounts"][slot].setdefault("name", f"ATM Account {slot}")
     user.setdefault("marriage_partner_id", "")
     user.setdefault("marriage_date", 0)
     user.setdefault("marriage_level", 0)
@@ -14913,11 +15054,15 @@ def describe_loss(loss_result, bet, label="Loss"):
         )
     return f"{label}: **-{format_coins(bet)} uwuncy**"
 
+GAME_WIN_TAX_RATE = 0.15  # 15% deduction on game winnings
+
 def settle_win(user, payout):
-    """Apply a winning payout and consume one potion for a 15% bonus."""
+    """Apply a 15% deduction on game wins, then apply bonus from Lucky Potion."""
+    tax_deduction = int(payout * GAME_WIN_TAX_RATE)
+    net_payout = max(0, payout - tax_deduction)
     boosted = consume_item(user, "luckypot")
-    bonus = int(payout * 0.15) if boosted else 0
-    total_payout = payout + bonus
+    bonus = int(net_payout * 0.15) if boosted else 0
+    total_payout = net_payout + bonus
     credit_wallet(user, total_payout)
     return total_payout, bonus, boosted
 
@@ -15011,39 +15156,60 @@ def purchase_shop_item(user, item, quantity=1):
     }
 
 def parse_coins(value, wallet_balance=None):
-    """Parse a user-entered coin amount, supporting k, m, b, t, q suffixes, decimals, all, and half."""
+    """Parse a user-entered coin amount, supporting k, m, b, t, q, and higher suffixes, decimals, all, half, inf, and scientific notation."""
     if value is None:
         return None
     if isinstance(wallet_balance, dict):
         wallet_balance = get_effective_wallet(wallet_balance)
     try:
         text = str(value).strip().replace(",", "").replace("_", "").casefold()
-        if text in ["all", "max"]:
+        if text in ["all", "max", "everything", "full"]:
             if wallet_balance is not None:
                 return max(0, int(wallet_balance))
             return None
-        if text in ["half", "1/2"]:
+        if text in ["half", "1/2", "mid"]:
             if wallet_balance is not None:
                 return max(0, int(wallet_balance // 2))
             return None
+        if text in ["inf", "infinity", "infinite", "unlimited"]:
+            if wallet_balance is not None:
+                return max(0, int(wallet_balance))
+            return None
+
+        # Sorted by length descending so longer suffixes match first
+        suffixes = (
+            ("decillion", 10**33), ("dec", 10**33), ("dc", 10**33),
+            ("nonillion", 10**30), ("non", 10**30), ("no", 10**30),
+            ("octillion", 10**27), ("oct", 10**27), ("oc", 10**27),
+            ("septillion", 10**24), ("sep", 10**24), ("sp", 10**24),
+            ("sextillion", 10**21), ("sex", 10**21), ("sx", 10**21),
+            ("quintillion", 10**18), ("quin", 10**18), ("qi", 10**18), ("qn", 10**18),
+            ("quadrillion", 10**15), ("quad", 10**15), ("qa", 10**15), ("q", 10**15),
+            ("trillion", 10**12), ("tri", 10**12), ("t", 10**12),
+            ("billion", 10**9), ("bil", 10**9), ("b", 10**9),
+            ("million", 10**6), ("mil", 10**6), ("m", 10**6),
+            ("thousand", 10**3), ("k", 10**3),
+        )
 
         multiplier = 1
-        if text.endswith(("k", "m", "b", "t", "q")):
-            suffix = text[-1]
-            multiplier = {
-                "k": 1_000,
-                "m": 1_000_000,
-                "b": 1_000_000_000,
-                "t": 1_000_000_000_000,
-                "q": 1_000_000_000_000_000,
-            }[suffix]
-            text = text[:-1]
+        for suffix_str, mult_val in suffixes:
+            if text.endswith(suffix_str):
+                multiplier = mult_val
+                text = text[:-len(suffix_str)].strip()
+                break
 
-        val = float(text) * multiplier
+        if not text:
+            return None
+
+        if "." in text or "e" in text:
+            val = int(float(text) * multiplier)
+        else:
+            val = int(text) * multiplier
+
         if val < 0:
             return None
         return int(val)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 # ==============================================
@@ -19879,6 +20045,46 @@ async def on_member_join(member):
             except discord.HTTPException:
                 pass
 
+    # 5. VERIFY FIRST Enforcement for New Joiners
+    if settings.get("verification_enabled", False) and not member.bot:
+        verify_chan_id = settings.get("verify_channel_id")
+        verify_chan = member.guild.get_channel(verify_chan_id) if verify_chan_id else None
+        role_id = settings.get("verify_role_id")
+        target_role = member.guild.get_role(int(role_id)) if role_id else None
+
+        # Send DM prompt to new member if DM enabled
+        if settings.get("verify_dm_welcome", True):
+            try:
+                dm_embed = discord.Embed(
+                    title=f"🛡️ Action Required: Verify First • {member.guild.name}",
+                    description=(
+                        f"Hey **{member.display_name}**, welcome to **{member.guild.name}**!\n\n"
+                        f"🔒 **You must click VERIFY FIRST before entering and chatting in this server.**\n\n"
+                        f"Click the green **`🛡️ Verify First`** button below to complete verification and unlock full server access!"
+                    ),
+                    color=discord.Color.green()
+                )
+                if member.guild.icon:
+                    dm_embed.set_thumbnail(url=member.guild.icon.url)
+                if verify_chan:
+                    dm_embed.add_field(name="📍 Verification Channel", value=f"{verify_chan.mention}", inline=False)
+                await member.send(embed=dm_embed, view=VerifyButtonView())
+            except Exception:
+                pass
+
+        # If verify channel exists and has no recent active panel, mention user there
+        if verify_chan and verify_chan.permissions_for(member.guild.me).send_messages:
+            try:
+                role_name = target_role.name if target_role else "Verified"
+                v_embed = discord.Embed(
+                    title=f"🔒 Verification Required • {member.display_name}",
+                    description=f"Welcome {member.mention}! Please click **`🛡️ Verify First`** below to receive the **@{role_name}** role and start chatting.",
+                    color=discord.Color.green()
+                )
+                await verify_chan.send(content=f"{member.mention}", embed=v_embed, view=VerifyButtonView())
+            except Exception:
+                pass
+
 
 @bot.event
 async def on_member_remove(member):
@@ -20334,8 +20540,138 @@ async def on_raw_reaction_add(payload):
         pass
 
 
+# ==============================================
+# 🛡️ SERVER VERIFICATION SYSTEM & PERSISTENT VIEW
+# ==============================================
+def build_verify_panel_embed(guild, role=None):
+    role_name = role.name if role else "Verified Member"
+    embed = discord.Embed(
+        title=f"🛡️ Server Verification • {guild.name}",
+        description=(
+            f"Welcome to **{guild.name}**!\n\n"
+            f"🔒 **VERIFY FIRST BEFORE ENTERING & CHATTING!**\n"
+            f"To keep this server secure against automated spam bots, alt raids, and phishing attacks, all members must verify.\n\n"
+            f"### 📋 How to Verify:\n"
+            f"1️⃣ Click the green **`🛡️ Verify First`** button below.\n"
+            f"2️⃣ You will instantly receive the **@{role_name}** role.\n"
+            f"3️⃣ All channels and chat permissions will immediately unlock for you!\n\n"
+            f"*Need help? Contact server moderators or admins.*"
+        ),
+        color=discord.Color.green()
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.set_footer(text=f"Server Security & Verification Gate • {guild.name}")
+    return embed
+
+
+class VerifyButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Verify First",
+        style=discord.ButtonStyle.success,
+        custom_id="uwu_server_verify_btn",
+        emoji="🛡️"
+    )
+    async def verify_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("❌ This action can only be used inside a server.", ephemeral=True)
+
+        settings = get_guild_moderation_settings(guild)
+        role_id = settings.get("verify_role_id")
+        target_role = None
+
+        if role_id:
+            try:
+                target_role = guild.get_role(int(role_id))
+            except Exception:
+                target_role = None
+
+        if target_role is None:
+            # Fallback: look for a role named "Verified" or "Member"
+            for r in guild.roles:
+                if r.name.lower() in ["verified", "member", "members"]:
+                    target_role = r
+                    settings["verify_role_id"] = r.id
+                    save_guild_moderation_settings(guild)
+                    break
+
+        if target_role is None:
+            # Auto-create "Verified" role if bot has permissions
+            if guild.me.guild_permissions.manage_roles:
+                try:
+                    target_role = await guild.create_role(
+                        name="Verified",
+                        reason="[Verification System] Auto-created Verified role for server verification",
+                        color=discord.Color.green()
+                    )
+                    settings["verify_role_id"] = target_role.id
+                    save_guild_moderation_settings(guild)
+                except Exception as e:
+                    return await interaction.response.send_message(
+                        f"❌ Server verification role is not configured, and bot could not create one: `{e}`. Please ask a Server Admin to run `uwu setupverify @Role`.",
+                        ephemeral=True
+                    )
+            else:
+                return await interaction.response.send_message(
+                    "❌ Verification role is not configured. Server Admins must run `uwu setupverify @Role` to complete setup!",
+                    ephemeral=True
+                )
+
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            member = guild.get_member(interaction.user.id)
+            if not member:
+                return await interaction.response.send_message("❌ Could not locate your member profile in this server.", ephemeral=True)
+
+        # Check if already has the role
+        if target_role in member.roles:
+            return await interaction.response.send_message(
+                f"ℹ️ You are **already verified** in **{guild.name}**! You have the **@{target_role.name}** role and full access to chat.",
+                ephemeral=True
+            )
+
+        # Check bot hierarchy
+        if guild.me.top_role.position <= target_role.position:
+            return await interaction.response.send_message(
+                f"❌ **Role Hierarchy Error**: The bot's highest role is not high enough to grant **@{target_role.name}**.\n"
+                f"Please ask a Server Admin to move the Bot's role **above** **@{target_role.name}** in Server Settings > Roles.",
+                ephemeral=True
+            )
+
+        try:
+            await member.add_roles(target_role, reason="[Verification System] Member clicked Verify First")
+            settings["verification_enabled"] = True
+            save_guild_moderation_settings(guild)
+            await interaction.response.send_message(
+                f"🎉 **Verification Successful!**\n"
+                f"Welcome to **{guild.name}**, {member.mention}! You have been granted the **@{target_role.name}** role.\n"
+                f"You can now chat, view all server channels, and explore the community! 🚀",
+                ephemeral=True
+            )
+            # Log action
+            await log_moderation_action(guild, f"🛡️ **Member Verified:** {member.mention} (`{member.id}`) clicked Verify First and received **@{target_role.name}**.")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"❌ The bot lacks permission to assign **@{target_role.name}**. Please check bot permissions and role hierarchy.",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to verify: `{e}`", ephemeral=True)
+
+
 @bot.event
 async def on_ready():
+    # ✅ Register persistent interactive views
+    try:
+        bot.add_view(VerifyButtonView())
+        print("✅ SERVER VERIFICATION PERSISTENT VIEW REGISTERED")
+    except Exception as exc:
+        print(f"⚠️ Verification view registration notice: {exc}")
+
     # ✅ Connect to Lavalink pool inside event loop
     nodes = []
     for cfg in LAVALINK_NODE_CONFIGS:
@@ -20611,6 +20947,17 @@ async def money(ctx):
             partner_name = f"Partner ({partner_id})"
         lines.append(f"💍 **Married to {partner_name}** • Partner: `{format_coins(partner_wallet)}` • Joint: `{format_coins(shared_total)}`")
 
+    total_wealth = int(user.get("wallet", 0)) + int(user.get("bank", 0))
+    if total_wealth >= 50_000_000_000_000_000:
+        elapsed_tax = time.time() - float(user.get("last_tax_paid", 0) or 0)
+        if elapsed_tax >= 43200:
+            lines.append("⚠️ **12-Hour Wealth Tax Due (10q)!** Run `uwu paytax` to pay your 10q tax and unlock games.")
+        else:
+            remaining = int(43200 - elapsed_tax)
+            h, r = divmod(remaining, 3600)
+            m, _ = divmod(r, 60)
+            lines.append(f"🏛️ **12-Hour Wealth Tax:** Paid ✅ (Games unlocked • Next due in {h}h {m}m)")
+
     await ctx.send("\n".join(lines))
 
 
@@ -20859,11 +21206,14 @@ async def cf(ctx, first: str, second: str):
     )
 
 @bot.command(name="deposit", aliases=["dep"])
-async def deposit(ctx, amount: int):
+async def deposit(ctx, amount_text: str = None):
+    if amount_text is None:
+        return await ctx.send("❌ Usage: `uwu deposit <amount>` (e.g. `uwu dep 50k`, `uwu dep 10m`, `uwu dep all`, `uwu dep half`).")
     user = get_user(ctx.author.id)
     apply_bank_interest(user)
-    if amount <= 0 or not debit_wallet(user, amount):
-        return await ctx.send("❌ Not enough uwuncy!")
+    amount = parse_coins(amount_text, user["wallet"])
+    if amount is None or amount <= 0 or not debit_wallet(user, amount):
+        return await ctx.send("❌ Not enough uwuncy in wallet to deposit!")
     user["bank"] += amount
     save_data(DATA)
     await ctx.send(f"Deposited **{format_coins(amount)} uwuncy**.")
@@ -20937,14 +21287,14 @@ async def withdraw(ctx, *args):
             "Use `uwu withdraw <amount>` for bank uwuncy, or "
             "`uwu withdraw crypto <crypto> <amount>`."
         )
-    try:
-        amount = parse_coins(args[0])
-    except (TypeError, ValueError):
-        amount = None
     user = get_user(ctx.author.id)
     apply_bank_interest(user)
+    try:
+        amount = parse_coins(args[0], user.get("bank", 0))
+    except (TypeError, ValueError, OverflowError):
+        amount = None
     if amount is None or amount <= 0 or user["bank"] < amount:
-        return await ctx.send("❌ Not enough uwuncy!")
+        return await ctx.send("❌ Not enough uwuncy in bank!")
     user["bank"] -= amount
     credit_wallet(user, amount)
     save_data(DATA)
@@ -20954,7 +21304,7 @@ async def withdraw(ctx, *args):
 async def withdraw_crypto(ctx, crypto: str = None, amount_text: str = "all"):
     await complete_crypto_withdrawal(ctx, crypto, amount_text)
 
-@bot.command(name="give", aliases=["pay"])
+@bot.command(name="give", aliases=["pay", "send", "transfer"])
 async def give(ctx, *, args: str):
     # --- PART 1: DETECT ROLE MENTION ---
     role = None
@@ -20967,10 +21317,10 @@ async def give(ctx, *, args: str):
         # Get amount & check split
         split_mode = "split" in args.lower()
         clean_args = args.lower().replace("split", "").strip()
-        try:
-            amount = int(clean_args.replace(",", ""))
-        except ValueError:
-            return await ctx.send("❌ Enter valid number! Example: `uwu give role @VIP 1000` or `uwu give role @VIP split 5000`")
+        sender = get_user(ctx.author.id)
+        amount = parse_coins(clean_args, sender)
+        if amount is None or amount <= 0:
+            return await ctx.send("❌ Enter valid amount! Example: `uwu give role @VIP 1000`, `uwu give role @VIP 50k`, or `uwu give role @VIP split 50m`")
 
         # Get members: WITH ROLE, NOT BOT, NOT YOU
         members = [m for m in ctx.guild.members if role in m.roles and not m.bot and m != ctx.author]
@@ -20981,51 +21331,373 @@ async def give(ctx, *, args: str):
         if split_mode:
             each_get = amount // len(members)
             total_pay = amount
-            mode_text = f"(split equally: each gets {each_get:,})"
+            mode_text = f"(split equally: each gets {format_coins(each_get)})"
         else:
             each_get = amount
             total_pay = each_get * len(members)
-            mode_text = f"(each gets full {each_get:,})"
+            mode_text = f"(each gets full {format_coins(each_get)})"
 
         # Check sender balance
-        sender = get_user(ctx.author.id)
         if sender["wallet"] < total_pay:
-            return await ctx.send(f"❌ You need **{total_pay:,} uwuncy**! You only have {sender['wallet']:,}")
+            return await ctx.send(f"❌ You need **{format_coins(total_pay)} uwuncy**! You only have {format_coins(sender['wallet'])}")
 
-        # Deduct & distribute
+        # Deduct & distribute with 20% transfer tax
         sender["wallet"] -= total_pay
+        tax_deduction = int(each_get * TRANSFER_TAX_RATE)
+        received_each = max(0, each_get - tax_deduction)
         for user in members:
             receiver = get_user(user.id)
-            receiver["wallet"] += each_get
+            receiver["wallet"] += received_each
 
         save_data(DATA)
-        return await ctx.send(f"✅ Gave **{role.name}** {len(members)} members {mode_text}\n💸 Total paid from you: **{total_pay:,} uwuncy**")
+        return await ctx.send(
+            f"✅ Gave **{role.name}** {len(members)} members {mode_text}\n"
+            f"💸 Total paid: **{format_coins(total_pay)} uwuncy** (Each member received **{format_coins(received_each)} uwuncy** after 20% transfer tax)."
+        )
 
-    # --- PART 3: ORIGINAL DIRECT USER GIVE (KEEP YOUR OLD WORKING!) ---
+    # --- PART 3: ORIGINAL DIRECT USER GIVE ---
     else:
         parts = args.split()
         if len(parts) < 2:
             return await ctx.send("❌ Use: `uwu give @user amount` or `uwu give role @Role amount / split amount`")
         try:
             member = await commands.MemberConverter().convert(ctx, parts[0])
-            amount = int(parts[1].replace(",", ""))
-        except:
-            return await ctx.send("❌ Invalid format! Example: `uwu give @Mark 50000`")
+            sender = get_user(ctx.author.id)
+            amount = parse_coins(parts[1], sender)
+        except Exception:
+            return await ctx.send("❌ Invalid format! Example: `uwu give @user 50000`, `uwu give @user 50k`, `uwu give @user 100b`, `uwu give @user all`")
 
-        if amount <= 0 or member == ctx.author:
+        if amount is None or amount <= 0 or member == ctx.author:
             return await ctx.send("❌ Invalid amount or cannot send to yourself!")
 
-        sender = get_user(ctx.author.id)
         receiver = get_user(member.id)
 
         if sender["wallet"] < amount:
             return await ctx.send("❌ Not enough uwuncy!")
 
+        tax_deduction = int(amount * TRANSFER_TAX_RATE)
+        received_amount = max(0, amount - tax_deduction)
+
         if not transfer_wallet(sender, receiver, amount):
             return await ctx.send("❌ Transfer could not be completed.")
 
         save_data(DATA)
-        await ctx.send(f"✅ Sent **{format_coins(amount)} uwuncy** to {member.mention}.")
+        await ctx.send(
+            f"✅ Sent **{format_coins(amount)} uwuncy** to {member.mention}.\n"
+            f"💸 *20% transfer tax deducted (-{format_coins(tax_deduction)} uwuncy). Recipient received **{format_coins(received_amount)} uwuncy**.*"
+        )
+
+@bot.command(name="paytax", aliases=["tax", "paytaxes"])
+async def paytax(ctx):
+    """Pay the 12-hour 10q wealth tax for users holding 50q+ total balance to unlock games."""
+    user = get_user(ctx.author.id)
+    total_balance = int(user.get("wallet", 0)) + int(user.get("bank", 0))
+
+    if total_balance < WEALTH_TAX_THRESHOLD:
+        return await ctx.send(
+            f"⚖️ **Tax Status**: Your total balance is **{format_coins(total_balance)} uwuncy**.\n"
+            f"The 12-hour wealth tax (**10q uwuncy**) only applies to accounts holding **50q+ uwuncy** (`50,000,000,000,000,000`) to maintain a balanced economy.\n"
+            f"🎮 You can currently play all games without paying wealth tax!"
+        )
+
+    last_paid = float(user.get("last_tax_paid", 0) or 0)
+    now = time.time()
+    elapsed = now - last_paid
+
+    if elapsed < TAX_CYCLE_SECONDS:
+        remaining = int(TAX_CYCLE_SECONDS - elapsed)
+        hours, rem = divmod(remaining, 3600)
+        minutes, _ = divmod(rem, 60)
+        return await ctx.send(
+            f"✅ **Tax Already Paid!**\n"
+            f"You have already paid your 10q wealth tax for this 12-hour cycle.\n"
+            f"🎮 **All games are currently unlocked for you!**\n"
+            f"⏰ Next tax payment is due in **{hours}h {minutes}m**."
+        )
+
+    if total_balance < WEALTH_TAX_AMOUNT:
+        return await ctx.send(
+            f"❌ You do not have enough total balance to pay the **10q uwuncy** tax!\n"
+            f"Total balance: `{format_coins(total_balance)}` uwuncy (required: `{format_coins(WEALTH_TAX_AMOUNT)}`)."
+        )
+
+    # Deduct 10q: prioritize wallet first, then bank
+    tax_to_deduct = WEALTH_TAX_AMOUNT
+    from_wallet = min(int(user.get("wallet", 0)), tax_to_deduct)
+    user["wallet"] = max(0, int(user.get("wallet", 0)) - from_wallet)
+    remainder = tax_to_deduct - from_wallet
+    if remainder > 0:
+        user["bank"] = max(0, int(user.get("bank", 0)) - remainder)
+
+    user["last_tax_paid"] = now
+    add_history(user, {
+        "type": "wealth_tax",
+        "result": "paid",
+        "amount": -tax_to_deduct,
+        "timestamp": int(now),
+    })
+    save_data(DATA)
+
+    await ctx.send(
+        f"🏛️ **Economy Wealth Tax Paid!**\n"
+        f"Deducted **10q uwuncy** (`{format_coins(WEALTH_TAX_AMOUNT)}`) from your balance to balance the server economy.\n"
+        f"🎮 **All games unlocked!** You can now play all games for the next **12 hours**.\n"
+        f"💼 Wallet: `{format_coins(user['wallet'])}` | 🏦 Bank: `{format_coins(user['bank'])}`\n"
+        f"⏰ Next tax payment is due in **12 hours**."
+    )
+
+# ==============================================
+# 🏧 ATM MULTI-ACCOUNT VAULT SYSTEM
+# ==============================================
+async def atm_bal_view(ctx, user, slot=None):
+    apply_atm_deductions(user)
+    atm_accounts = user.get("atm_accounts", {})
+    now = time.time()
+
+    if slot and str(slot).strip() in ["1", "2", "3", "4", "5"]:
+        slot_str = str(slot).strip()
+        acc = atm_accounts.get(slot_str, {})
+        bal = int(acc.get("balance", 0))
+        name = acc.get("name", f"ATM Account {slot_str}")
+        last_ded = float(acc.get("last_deduction", 0) or now)
+        elapsed = now - last_ded
+        rem = max(0, int(ATM_CYCLE_SECONDS - (elapsed % ATM_CYCLE_SECONDS)))
+        h, r = divmod(rem, 3600)
+        m, _ = divmod(r, 60)
+
+        embed = discord.Embed(
+            title=f"🏧 ATM Account #{slot_str} • {name}",
+            description=f"High-capacity storage account for **{ctx.author.display_name}**.",
+            color=discord.Color.teal()
+        )
+        embed.add_field(name="💰 Stored Balance", value=f"**`{format_coins(bal)}`** uwuncy", inline=False)
+        fee_info = "⚠️ **-5q fee every 12h** (balance ≥ 1q)" if bal >= ATM_DEDUCTION_THRESHOLD else "✅ **No maintenance fee** (balance < 1q)"
+        embed.add_field(name="⚖️ 12h Maintenance Status", value=f"{fee_info}\n⏰ Next 12h cycle in: **{h}h {m}m**", inline=False)
+        embed.add_field(
+            name="💡 Quick Actions",
+            value=(
+                f"• Deposit: `uwu atm dep <amount> {slot_str}`\n"
+                f"• Withdraw: `uwu atm with <amount|all> {slot_str}`\n"
+                f"• Rename: `uwu atm rename {slot_str} <new name>`"
+            ),
+            inline=False
+        )
+        return await ctx.send(embed=embed)
+
+    total_atm = sum(int(acc.get("balance", 0)) for acc in atm_accounts.values())
+    embed = discord.Embed(
+        title=f"🏧 ATM Multi-Account Vaults • {ctx.author.display_name}",
+        description=(
+            f"You have **5 independent ATM accounts** for storing massive balances (1qa+ capacity).\n\n"
+            f"💼 **Wallet Balance:** `{format_coins(user['wallet'])}` uwuncy\n"
+            f"🌐 **Total Across 5 ATMs:** `{format_coins(total_atm)}` uwuncy\n\n"
+            f"🔒 *Note: ATM balances are stored separately and not included in standard `uwu bal`.*\n"
+            f"⚡ *Maintenance: Accounts holding 1q+ deduct 5q every 12 hours.*"
+        ),
+        color=discord.Color.teal()
+    )
+
+    for slot_id in ["1", "2", "3", "4", "5"]:
+        acc = atm_accounts.get(slot_id, {})
+        bal = int(acc.get("balance", 0))
+        name = acc.get("name", f"ATM Account {slot_id}")
+        last_ded = float(acc.get("last_deduction", 0) or now)
+        elapsed = now - last_ded
+        rem = max(0, int(ATM_CYCLE_SECONDS - (elapsed % ATM_CYCLE_SECONDS)))
+        h, r = divmod(rem, 3600)
+        m, _ = divmod(r, 60)
+
+        status_tag = " • ⚠️ *(-5q/12h)*" if bal >= ATM_DEDUCTION_THRESHOLD else ""
+        embed.add_field(
+            name=f"💳 Account #{slot_id}: {name}",
+            value=f"↳ Balance: **`{format_coins(bal)}`** uwuncy{status_tag}\n↳ Next 12h deduction: `{h}h {m}m`",
+            inline=False
+        )
+
+    embed.add_field(
+        name="📖 ATM Commands",
+        value=(
+            "• `uwu atm dep <amount> [1-5]` — Deposit from wallet into ATM\n"
+            "• `uwu atm with <amount|all> [1-5]` — Withdraw from ATM to wallet\n"
+            "• `uwu atm move <from 1-5> <to 1-5> <amount|all>` — Move funds between ATM accounts\n"
+            "• `uwu atm rename <1-5> <name>` — Rename an ATM account\n"
+            "• `uwu atm bal [1-5]` — View single ATM account details"
+        ),
+        inline=False
+    )
+    embed.set_footer(text="UwU Bot High-Capacity ATM Banking System • 5 Accounts Available")
+    await ctx.send(embed=embed)
+
+async def atm_deposit_action(ctx, user, amount_text, slot="1"):
+    slot_str = str(slot).strip() if slot else "1"
+    if slot_str not in ["1", "2", "3", "4", "5"]:
+        return await ctx.send("❌ Invalid ATM account number! Choose an account from **1** to **5**. Example: `uwu atm dep 100q 1`")
+
+    apply_atm_deductions(user)
+    amount = parse_coins(amount_text, user)
+    if amount is None or amount <= 0:
+        return await ctx.send("❌ Invalid deposit amount! Example: `uwu atm dep 500q 1`, `uwu atm dep 1qa 2`, or `uwu atm dep all 1`.")
+
+    if user["wallet"] < amount:
+        return await ctx.send(f"❌ Not enough uwuncy in wallet! You have `{format_coins(user['wallet'])}` uwuncy in wallet.")
+
+    user["wallet"] -= amount
+    acc = user["atm_accounts"][slot_str]
+    acc["balance"] = int(acc.get("balance", 0)) + amount
+    acc.setdefault("last_deduction", time.time())
+
+    add_history(user, {
+        "type": "atm_deposit",
+        "result": "stored",
+        "amount": amount,
+        "slot": slot_str,
+        "timestamp": int(time.time()),
+    })
+    save_data(DATA)
+
+    await ctx.send(
+        f"🏧 **ATM Deposit Successful!**\n"
+        f"Deposited **{format_coins(amount)} uwuncy** into **Account #{slot_str} ({acc.get('name')})**.\n"
+        f"💳 **Account #{slot_str} New Balance:** `{format_coins(acc['balance'])}` uwuncy\n"
+        f"💼 **Remaining Wallet:** `{format_coins(user['wallet'])}` uwuncy"
+    )
+
+async def atm_withdraw_action(ctx, user, amount_text, slot="1"):
+    slot_str = str(slot).strip() if slot else "1"
+    if slot_str not in ["1", "2", "3", "4", "5"]:
+        return await ctx.send("❌ Invalid ATM account number! Choose an account from **1** to **5**. Example: `uwu atm with 50q 1`")
+
+    apply_atm_deductions(user)
+    acc = user["atm_accounts"][slot_str]
+    acc_bal = int(acc.get("balance", 0))
+
+    if acc_bal <= 0:
+        return await ctx.send(f"❌ **Account #{slot_str} ({acc.get('name')})** is empty (0 uwuncy)!")
+
+    amount = parse_coins(amount_text, acc_bal)
+    if amount is None or amount <= 0:
+        return await ctx.send("❌ Invalid withdrawal amount! Example: `uwu atm with 100q 1`, `uwu atm with all 1`, `uwu atm with 1qa 2`.")
+
+    if acc_bal < amount:
+        return await ctx.send(f"❌ Not enough balance in **Account #{slot_str}**! Available: `{format_coins(acc_bal)}` uwuncy.")
+
+    acc["balance"] = acc_bal - amount
+    user["wallet"] = int(user.get("wallet", 0)) + amount
+
+    add_history(user, {
+        "type": "atm_withdraw",
+        "result": "withdrawn",
+        "amount": amount,
+        "slot": slot_str,
+        "timestamp": int(time.time()),
+    })
+    save_data(DATA)
+
+    await ctx.send(
+        f"🏧 **ATM Withdrawal Successful!**\n"
+        f"Withdrew **{format_coins(amount)} uwuncy** from **Account #{slot_str} ({acc.get('name')})** to your wallet.\n"
+        f"💳 **Account #{slot_str} Remaining:** `{format_coins(acc['balance'])}` uwuncy\n"
+        f"💼 **New Wallet Balance:** `{format_coins(user['wallet'])}` uwuncy"
+    )
+
+async def atm_move_action(ctx, user, from_slot, to_slot, amount_text):
+    if not from_slot or not to_slot or not amount_text:
+        return await ctx.send("❌ Usage: `uwu atm move <from 1-5> <to 1-5> <amount|all>`\nExample: `uwu atm move 1 2 50q`")
+
+    from_str, to_str = str(from_slot).strip(), str(to_slot).strip()
+    if from_str not in ["1", "2", "3", "4", "5"] or to_str not in ["1", "2", "3", "4", "5"]:
+        return await ctx.send("❌ Both account numbers must be between 1 and 5!")
+
+    if from_str == to_str:
+        return await ctx.send("❌ Cannot transfer to the same ATM account!")
+
+    apply_atm_deductions(user)
+    src_acc = user["atm_accounts"][from_str]
+    dst_acc = user["atm_accounts"][to_str]
+    src_bal = int(src_acc.get("balance", 0))
+
+    amount = parse_coins(amount_text, src_bal)
+    if amount is None or amount <= 0 or src_bal < amount:
+        return await ctx.send(f"❌ Invalid amount or insufficient balance in Account #{from_str}! Available: `{format_coins(src_bal)}` uwuncy.")
+
+    src_acc["balance"] -= amount
+    dst_acc["balance"] = int(dst_acc.get("balance", 0)) + amount
+    save_data(DATA)
+
+    await ctx.send(
+        f"🔄 **ATM Funds Transferred!**\n"
+        f"Moved **{format_coins(amount)} uwuncy** from **Account #{from_str} ({src_acc.get('name')})** ➔ **Account #{to_str} ({dst_acc.get('name')})**.\n"
+        f"💳 Account #{from_str}: `{format_coins(src_acc['balance'])}` uwuncy | Account #{to_str}: `{format_coins(dst_acc['balance'])}` uwuncy"
+    )
+
+async def atm_rename_action(ctx, user, slot, new_name):
+    slot_str = str(slot).strip() if slot else None
+    if not slot_str or slot_str not in ["1", "2", "3", "4", "5"] or not new_name:
+        return await ctx.send("❌ Usage: `uwu atm rename <1-5> <New Name>`\nExample: `uwu atm rename 1 High Roller Vault`")
+
+    clean_name = str(new_name).strip()[:32]
+    user["atm_accounts"][slot_str]["name"] = clean_name
+    save_data(DATA)
+    await ctx.send(f"✅ **ATM Account #{slot_str}** has been renamed to **`{clean_name}`**!")
+
+@bot.command(name="atm", aliases=["atms", "atmvault"])
+async def atm_cmd(ctx, *, args: str = None):
+    """
+    ATM Vault System: 5 multi-account high-capacity storage accounts.
+    Deducts 5q every 12 hours for accounts holding quadrillions (>= 1q).
+    """
+    user = get_user(ctx.author.id)
+    if not args:
+        return await atm_bal_view(ctx, user, None)
+
+    parts = args.split()
+    sub = parts[0].lower()
+    if sub in ["bal", "balance", "list", "accounts", "status", "view"]:
+        slot = parts[1] if len(parts) > 1 else None
+        return await atm_bal_view(ctx, user, slot)
+    elif sub in ["dep", "deposit", "store", "d"]:
+        amount_text = parts[1] if len(parts) > 1 else None
+        slot = parts[2] if len(parts) > 2 else "1"
+        return await atm_deposit_action(ctx, user, amount_text, slot)
+    elif sub in ["with", "withdraw", "take", "w"]:
+        amount_text = parts[1] if len(parts) > 1 else None
+        slot = parts[2] if len(parts) > 2 else "1"
+        return await atm_withdraw_action(ctx, user, amount_text, slot)
+    elif sub in ["move", "transfer", "swap"]:
+        from_slot = parts[1] if len(parts) > 1 else None
+        to_slot = parts[2] if len(parts) > 2 else None
+        amount_text = parts[3] if len(parts) > 3 else None
+        return await atm_move_action(ctx, user, from_slot, to_slot, amount_text)
+    elif sub in ["rename", "label", "name"]:
+        slot = parts[1] if len(parts) > 1 else None
+        new_name = " ".join(parts[2:]) if len(parts) > 2 else None
+        return await atm_rename_action(ctx, user, slot, new_name)
+    elif sub.isdigit() and sub in ["1", "2", "3", "4", "5"]:
+        return await atm_bal_view(ctx, user, sub)
+    else:
+        return await atm_bal_view(ctx, user, None)
+
+@bot.command(name="atmdep", aliases=["atmdeposit", "depatm"])
+async def atmdep_cmd(ctx, amount_text: str = None, slot: str = "1"):
+    """Deposit coins from wallet into an ATM account (1-5)."""
+    user = get_user(ctx.author.id)
+    if not amount_text:
+        return await ctx.send("❌ Usage: `uwu atmdep <amount> [account 1-5]` (e.g., `uwu atmdep 500q 1`, `uwu atmdep 1qa 2`, `uwu atmdep all 1`)")
+    await atm_deposit_action(ctx, user, amount_text, slot)
+
+@bot.command(name="atmwith", aliases=["atmwithdraw", "withatm"])
+async def atmwith_cmd(ctx, amount_text: str = None, slot: str = "1"):
+    """Withdraw coins from an ATM account (1-5) into wallet."""
+    user = get_user(ctx.author.id)
+    if not amount_text:
+        return await ctx.send("❌ Usage: `uwu atmwith <amount|all> [account 1-5]` (e.g., `uwu atmwith 100q 1`, `uwu atmwith all 1`)")
+    await atm_withdraw_action(ctx, user, amount_text, slot)
+
+@bot.command(name="atmbal", aliases=["atmaccounts", "atmbalance"])
+async def atmbal_cmd(ctx, slot: str = None):
+    """View ATM accounts balance."""
+    user = get_user(ctx.author.id)
+    await atm_bal_view(ctx, user, slot)
 
 @bot.command(name="slot", aliases=["slots"])
 async def slot(ctx, bet_text: str = None):
@@ -22874,7 +23546,7 @@ class DoubleOrNothingView(discord.ui.View):
                 break
 
         if won:
-            reward = self.stake * 2
+            reward = int((self.stake * 2) * (1.0 - GAME_WIN_TAX_RATE))
             credit_wallet(user, reward)
             finish_game(user, self.game_name, self.stake, True, reward)
             save_data(DATA)
@@ -24800,18 +25472,264 @@ async def setwelcome_cmd(ctx, target: str = None, channel: discord.TextChannel =
         embed=embed
     )
 
+@bot.command(name="setupverify", aliases=["verifysetup", "setverify"])
+async def setupverify_cmd(ctx, role_input: str = None, channel_input: discord.TextChannel = None):
+    """Complete all-in-one setup for the Server Verification Gate."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Server** permission to configure verification.")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    target_role = None
+
+    # Determine role from mentions or string
+    if ctx.message.role_mentions:
+        target_role = ctx.message.role_mentions[0]
+    elif role_input:
+        clean_input = role_input.strip()
+        if clean_input.startswith("<@&") and clean_input.endswith(">"):
+            try:
+                rid = int(clean_input.replace("<@&", "").replace(">", ""))
+                target_role = ctx.guild.get_role(rid)
+            except Exception:
+                pass
+        elif clean_input.isdigit():
+            target_role = ctx.guild.get_role(int(clean_input))
+        else:
+            for r in ctx.guild.roles:
+                if r.name.lower() == clean_input.lower():
+                    target_role = r
+                    break
+
+    # If no role provided or found, search for existing "Verified" role or create one
+    if target_role is None:
+        for r in ctx.guild.roles:
+            if r.name.lower() in ["verified", "member", "members"]:
+                target_role = r
+                break
+        if target_role is None:
+            if ctx.guild.me.guild_permissions.manage_roles:
+                try:
+                    target_role = await ctx.guild.create_role(
+                        name="Verified",
+                        reason="[Verification System] Auto-created Verified role for server setup",
+                        color=discord.Color.green()
+                    )
+                except Exception as e:
+                    return await ctx.send(f"❌ Could not auto-create a `@Verified` role: `{e}`. Please provide a role: `uwu setupverify @Role #channel`.")
+            else:
+                return await ctx.send("❌ Please specify a role to give upon verification: `uwu setupverify @Role #channel`.")
+
+    # Determine channel
+    target_channel = channel_input
+    if target_channel is None and ctx.message.channel_mentions:
+        target_channel = ctx.message.channel_mentions[0]
+    if target_channel is None:
+        target_channel = ctx.channel
+
+    settings["verify_role_id"] = target_role.id
+    settings["verify_channel_id"] = target_channel.id
+    settings["verification_enabled"] = True
+    save_guild_moderation_settings(ctx.guild)
+
+    # Send the interactive panel
+    panel_embed = build_verify_panel_embed(ctx.guild, target_role)
+    panel_msg = await target_channel.send(embed=panel_embed, view=VerifyButtonView())
+    settings["verify_message_id"] = panel_msg.id
+    save_guild_moderation_settings(ctx.guild)
+
+    await ctx.send(
+        f"✅ **Server Verification System is now ACTIVE!**\n\n"
+        f"🛡️ **Verified Role:** {target_role.mention}\n"
+        f"📍 **Verification Channel:** {target_channel.mention}\n"
+        f"🔘 **Interactive Panel:** Successfully posted in {target_channel.mention} with the **`🛡️ Verify First`** button.\n"
+        f"🔒 New members and invited guests will be required to click **Verify First** before chatting!"
+    )
+
+
+@bot.command(name="verifypanel", aliases=["sendverify", "verifycard", "verifymsg"])
+async def verifypanel_cmd(ctx, channel: discord.TextChannel = None):
+    """Post the official interactive Verify First button panel into a channel."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Server** permission to post the verification panel.")
+
+    target_channel = channel or ctx.channel
+    settings = get_guild_moderation_settings(ctx.guild)
+    role_id = settings.get("verify_role_id")
+    target_role = ctx.guild.get_role(int(role_id)) if role_id else None
+
+    embed = build_verify_panel_embed(ctx.guild, target_role)
+    msg = await target_channel.send(embed=embed, view=VerifyButtonView())
+    settings["verify_channel_id"] = target_channel.id
+    settings["verify_message_id"] = msg.id
+    settings["verification_enabled"] = True
+    save_guild_moderation_settings(ctx.guild)
+
+    if target_channel != ctx.channel:
+        await ctx.send(f"✅ **Verification panel posted in {target_channel.mention}!**")
+
+
+@bot.command(name="setverifyrole", aliases=["verifyrole"])
+async def setverifyrole_cmd(ctx, *, role_input: str = None):
+    """Set or update the role granted when members verify."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Server** permission to change the verification role.")
+
+    if not role_input:
+        settings = get_guild_moderation_settings(ctx.guild)
+        role_id = settings.get("verify_role_id")
+        current_role = ctx.guild.get_role(int(role_id)) if role_id else None
+        status = f"currently {current_role.mention}" if current_role else "currently **not set**"
+        return await ctx.send(f"ℹ️ Verified role is {status}.\nUsage: `uwu setverifyrole @Role` or `uwu setverifyrole Member`.")
+
+    target_role = None
+    if ctx.message.role_mentions:
+        target_role = ctx.message.role_mentions[0]
+    else:
+        clean_input = role_input.strip()
+        if clean_input.isdigit():
+            target_role = ctx.guild.get_role(int(clean_input))
+        else:
+            for r in ctx.guild.roles:
+                if r.name.lower() == clean_input.lower():
+                    target_role = r
+                    break
+
+    if not target_role:
+        return await ctx.send(f"❌ Could not find a role matching `{role_input}`.")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    settings["verify_role_id"] = target_role.id
+    save_guild_moderation_settings(ctx.guild)
+    await ctx.send(f"✅ **Verification role set to {target_role.mention}!** Users who click Verify First will receive this role.")
+
+
+@bot.command(name="toggleverify", aliases=["enableverify", "disableverify"])
+async def toggleverify_cmd(ctx, action: str = None):
+    """Toggle server verification gate ON or OFF."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+    if not (ctx.author.guild_permissions.manage_guild or ctx.author.id == ctx.guild.owner_id or is_owner(ctx)):
+        return await ctx.send("❌ You need **Manage Server** permission to toggle verification.")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    if action:
+        act = action.lower()
+        if act in ["on", "enable", "true", "yes"]:
+            settings["verification_enabled"] = True
+        elif act in ["off", "disable", "false", "no"]:
+            settings["verification_enabled"] = False
+        else:
+            return await ctx.send("❌ Usage: `uwu toggleverify on` or `uwu toggleverify off`.")
+    else:
+        settings["verification_enabled"] = not settings.get("verification_enabled", False)
+
+    save_guild_moderation_settings(ctx.guild)
+    state_str = "🟢 **ENABLED (Active Protection)**" if settings["verification_enabled"] else "🔴 **DISABLED**"
+    await ctx.send(f"🛡️ **Server Verification Gate is now {state_str}!**")
+
+
+@bot.command(name="verifystatus", aliases=["verifyinfo", "verifysettings"])
+async def verifystatus_cmd(ctx):
+    """View current server verification settings and status."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    enabled = settings.get("verification_enabled", False)
+    role_id = settings.get("verify_role_id")
+    chan_id = settings.get("verify_channel_id")
+    role = ctx.guild.get_role(int(role_id)) if role_id else None
+    chan = ctx.guild.get_channel(chan_id) if chan_id else None
+
+    embed = discord.Embed(
+        title=f"🛡️ Server Verification Gate • {ctx.guild.name}",
+        color=discord.Color.green() if enabled else discord.Color.greyple()
+    )
+    embed.add_field(name="🔒 Status", value="🟢 **ACTIVE**" if enabled else "🔴 **DISABLED**", inline=True)
+    embed.add_field(name="🎖️ Verified Role", value=role.mention if role else "*Not configured*", inline=True)
+    embed.add_field(name="📍 Verification Channel", value=chan.mention if chan else "*Not configured*", inline=True)
+    embed.add_field(
+        name="📖 Configuration Commands",
+        value=(
+            "• `uwu setupverify @Role #channel` — Full automatic setup\n"
+            "• `uwu verifypanel [#channel]` — Send interactive button card\n"
+            "• `uwu setverifyrole @Role` — Change verified role\n"
+            "• `uwu toggleverify [on/off]` — Enable/disable verification gate"
+        ),
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="verify", aliases=["verifyfirst"])
+async def verify_cmd(ctx):
+    """Member command to complete verification and receive verified role."""
+    if ctx.guild is None:
+        return await ctx.send("❌ This command can only be used inside a server.")
+
+    settings = get_guild_moderation_settings(ctx.guild)
+    role_id = settings.get("verify_role_id")
+    target_role = None
+
+    if role_id:
+        try:
+            target_role = ctx.guild.get_role(int(role_id))
+        except Exception:
+            target_role = None
+
+    if target_role is None:
+        for r in ctx.guild.roles:
+            if r.name.lower() in ["verified", "member", "members"]:
+                target_role = r
+                break
+
+    if target_role is None:
+        return await ctx.send("❌ Server verification role is not configured yet. Server Admins can run `uwu setupverify @Role`.")
+
+    if target_role in ctx.author.roles:
+        return await ctx.send(f"ℹ️ {ctx.author.mention}, you are **already verified** with the **@{target_role.name}** role!")
+
+    if ctx.guild.me.top_role.position <= target_role.position:
+        return await ctx.send(f"❌ Bot role hierarchy error: The bot cannot grant **@{target_role.name}** because the bot's role is not high enough.")
+
+    try:
+        await ctx.author.add_roles(target_role, reason="[Verification System] Member used uwu verify command")
+        await ctx.send(f"🎉 **Verification Successful!** Welcome {ctx.author.mention}, you have received the **@{target_role.name}** role and can now chat freely! 🚀")
+        await log_moderation_action(ctx.guild, f"🛡️ **Member Verified:** {ctx.author.mention} (`{ctx.author.id}`) verified via command and received **@{target_role.name}**.")
+    except discord.Forbidden:
+        await ctx.send("❌ Bot lacks permission to assign roles. Please ask a Server Admin.")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to verify: `{e}`")
+
+
 @bot.command(name="set")
 async def set_cmd(ctx, sub_cmd: str = None, target: str = None, channel: discord.TextChannel = None):
     """Server setting management command."""
     if not sub_cmd:
-        return await ctx.send("ℹ️ Usage: `uwu set welcome #channel`, `uwu set welcome test`, or `uwu set welcome off`.")
+        return await ctx.send(
+            "ℹ️ **Server Settings Commands:**\n"
+            "• `uwu set welcome #channel` — Set welcome greeting channel\n"
+            "• `uwu set verify #channel` — Set verification channel\n"
+            "• `uwu set verifyrole @role` — Set verified member role\n"
+            "• `uwu set invites #channel` — Set invite tracker log channel"
+        )
     clean_sub = sub_cmd.lower()
     if clean_sub in ["welcome", "welcomechannel", "welcome_channel", "card"]:
         return await setwelcome_cmd(ctx, target=target, channel=channel)
     elif clean_sub in ["invite", "invites", "invitechannel", "invlog"]:
         return await invites_cmd(ctx, option="set", channel_or_member=target)
+    elif clean_sub in ["verify", "verification", "verifychannel"]:
+        return await verifypanel_cmd(ctx, channel=channel)
+    elif clean_sub in ["verifyrole", "vrole"]:
+        return await setverifyrole_cmd(ctx, role_input=target)
     else:
-        return await ctx.send(f"Unknown setting `{sub_cmd}`. Options: `welcome`, `invites`.")
+        return await ctx.send(f"Unknown setting `{sub_cmd}`. Options: `welcome`, `invites`, `verify`, `verifyrole`.")
 
 
 @bot.command(name="invites", aliases=["invs", "invite", "invboard", "topinvites", "invleaderboard"])
@@ -25425,18 +26343,23 @@ async def help_cmd(ctx, category: str = None):
             "desc": "Commands and daily benefits reserved exclusively for Server Boosters."
         },
         "economy": {
-            "title": "💰 Economy",
-            "aliases": ["econ", "wallet", "bank"],
+            "title": "💰 Economy & ATM Banking",
+            "aliases": ["econ", "wallet", "bank", "atm"],
             "items": [
                 ("claim", "claim hourly uwuncy reward"),
                 ("daily", "claim daily uwuncy streak"),
-                ("money", "bal / balance — check wallet & bank"),
+                ("money", "bal / balance — check wallet & bank (excludes ATM)"),
+                ("atm", "atm bal [1-5] — multi-account high-capacity storage (5 accounts)"),
+                ("atmdep", "atm dep <amount> [1-5] — deposit wallet balance into ATM"),
+                ("atmwith", "atm with <amount|all> [1-5] — withdraw funds from ATM"),
+                ("atmbal", "[1-5] — view detailed ATM accounts & 12h maintenance"),
+                ("paytax", "tax — pay 12h 10q wealth tax (for 50q+ accounts to unlock games)"),
                 ("hidebank", "hide bank details in uwu bal"),
                 ("showbank", "show bank details in uwu bal"),
                 ("info", "userinfo — check user profile & stats"),
                 ("deposit", "dep <amount|all> — deposit into bank"),
                 ("withdraw", "with <amount|all> — withdraw from bank"),
-                ("give", "pay @user <amount> — transfer uwuncy"),
+                ("give", "pay @user <amount> — transfer uwuncy (20% tax)"),
                 ("history", "bets / recent — transaction history"),
                 ("achievements", "ach / badges — view unlocked badges"),
                 ("quests", "quest / missions — daily & weekly quests"),
@@ -25539,9 +26462,15 @@ async def help_cmd(ctx, category: str = None):
             ],
         },
         "moderation": {
-            "title": "🛡️ Moderation & Server Protection",
-            "aliases": ["mod"],
+            "title": "🛡️ Moderation & Server Security",
+            "aliases": ["mod", "verify", "verification", "security"],
             "items": [
+                ("setupverify", "@Role #channel — setup verify first gate & button panel"),
+                ("verifypanel", "[#channel] — send official Verify First button panel"),
+                ("setverifyrole", "<@Role|Name> — set verified role granted on verify"),
+                ("toggleverify", "on/off — toggle server verification gate"),
+                ("verify", "verifyfirst — manual verification command"),
+                ("verifystatus", "verifyinfo — view verification settings"),
                 ("poll", "<choices> | [time] — create interactive community poll (up to 20 choices)"),
                 ("movie", "<title> [schedule] — host & announce movie night stream with poster & RSVP (Owner only)"),
                 ("kick", "@user [reason] — kick member"),
@@ -26137,32 +27066,15 @@ async def addcoins(ctx, *args):
     target_arg = None
 
     for arg in args:
-        cleaned = arg.replace(",", "").lower()
-        if cleaned.endswith("k") and cleaned[:-1].isdigit():
-            val = int(cleaned[:-1]) * 1000
-            if amount is None:
-                amount = val
-                continue
-        elif cleaned.endswith("m") and cleaned[:-1].isdigit():
-            val = int(cleaned[:-1]) * 1000000
-            if amount is None:
-                amount = val
-                continue
-        elif cleaned.endswith("b") and cleaned[:-1].isdigit():
-            val = int(cleaned[:-1]) * 1000000000
-            if amount is None:
-                amount = val
-                continue
-        elif cleaned.isdigit():
-            if amount is None:
-                amount = int(cleaned)
-                continue
-
+        parsed_val = parse_coins(arg)
+        if parsed_val is not None and parsed_val > 0 and amount is None:
+            amount = parsed_val
+            continue
         if target_arg is None:
             target_arg = arg
 
     if amount is None or amount <= 0:
-        return await ctx.send("❌ **Please specify a positive coin amount.** (e.g. `uwu addcoins @role 1000` or `uwu addcoins @user 50k`)")
+        return await ctx.send("❌ **Please specify a positive coin amount.** (e.g. `uwu addcoins @role 1000`, `uwu addcoins @user 50k`, `uwu addcoins @user 100b`, `uwu addcoins @user 100q`)")
 
     if not target_arg:
         target = ctx.author
@@ -26223,18 +27135,22 @@ async def addcoins(ctx, *args):
     await ctx.send(f"👑 Admin: Added **{format_coins(amount)} uwuncy** to {target.mention}.")
 
 @bot.command(name="removecoins", aliases=["takecoins"])
-async def removecoins(ctx, member: discord.Member, amount: int):
+async def removecoins(ctx, member: discord.Member, amount_text: str = None):
     if not is_owner(ctx): return await ctx.send("❌ **Owner only!**")
-    if amount <= 0: return await ctx.send("❌ Amount must be positive!")
+    if amount_text is None: return await ctx.send("❌ Usage: `uwu removecoins @user <amount>`")
+    amount = parse_coins(amount_text)
+    if amount is None or amount <= 0: return await ctx.send("❌ Amount must be positive!")
     u = get_user(member.id)
     debit_wallet(u, amount)
     save_data(DATA)
     await ctx.send(f"Admin: removed **{format_coins(amount)} uwuncy** from {member.mention}.")
 
 @bot.command(name="setcoins", aliases=["setbal"])
-async def setcoins(ctx, member: discord.Member, amount: int):
+async def setcoins(ctx, member: discord.Member, amount_text: str = None):
     if not is_owner(ctx): return await ctx.send("❌ **Owner only!**")
-    if amount < 0: return await ctx.send("❌ Can't set negative!")
+    if amount_text is None: return await ctx.send("❌ Usage: `uwu setbal @user <amount>`")
+    amount = parse_coins(amount_text)
+    if amount is None or amount < 0: return await ctx.send("❌ Can't set negative!")
     u = get_user(member.id)
     u["wallet"] = max(0, int(amount))
     save_data(DATA)
