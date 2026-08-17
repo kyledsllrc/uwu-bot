@@ -223,12 +223,30 @@ FIREBASE_DATABASE_URL = os.environ.get(
 
 def load_firebase_credentials():
     """Read the service account as inline JSON or as a path to a JSON file."""
-    raw_credentials = os.environ.get("FIREBASE_CREDENTIALS", "").strip()
+    # Check all common environment variable names
+    raw_credentials = (
+        os.environ.get("FIREBASE_CREDENTIALS")
+        or os.environ.get("FIREBASE_KEY")
+        or os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+        or ""
+    ).strip()
+
+    # If no env var set, check common default file paths
     if not raw_credentials:
-        raise RuntimeError("FIREBASE_CREDENTIALS secret is not configured")
-    # Hosting panels that cap environment variable length can point this at a file.
+        for default_file in ("firebase.json", "firebase_key.json", "credentials.json", "serviceAccountKey.json"):
+            if os.path.isfile(default_file):
+                raw_credentials = default_file
+                break
+
+    if not raw_credentials:
+        raise RuntimeError("FIREBASE_CREDENTIALS / FIREBASE_KEY secret is not configured (or firebase.json missing)")
+
+    # If it's a file path
     if not raw_credentials.startswith("{"):
-        with open(raw_credentials, "r", encoding="utf-8") as handle:
+        file_path = os.path.abspath(raw_credentials)
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"Firebase key file not found at: {file_path}")
+        with open(file_path, "r", encoding="utf-8") as handle:
             return json.load(handle)
     return json.loads(raw_credentials)
 
