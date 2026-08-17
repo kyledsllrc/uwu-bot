@@ -20092,8 +20092,8 @@ async def on_member_join(member):
     if settings.get("verification_enabled", False) and not member.bot:
         verify_chan_id = settings.get("verify_channel_id")
         verify_chan = member.guild.get_channel(verify_chan_id) if verify_chan_id else None
-        role_id = settings.get("verify_role_id")
-        target_role = member.guild.get_role(int(role_id)) if role_id else None
+        target_roles = get_guild_verify_roles(member.guild, settings)
+        roles_text = " & ".join([f"**@{r.name}**" for r in target_roles]) if target_roles else "**@Verified**"
 
         # Send DM prompt to new member if DM enabled
         if settings.get("verify_dm_welcome", True):
@@ -20103,7 +20103,7 @@ async def on_member_join(member):
                     description=(
                         f"Hey **{member.display_name}**, welcome to **{member.guild.name}**!\n\n"
                         f"🔒 **You must click VERIFY FIRST before entering and chatting in this server.**\n\n"
-                        f"Click the green **`🛡️ Verify First`** button below to complete verification and unlock full server access!"
+                        f"Click the green **`🛡️ Verify First`** button below to receive {roles_text} and unlock full server access!"
                     ),
                     color=discord.Color.green()
                 )
@@ -20118,10 +20118,9 @@ async def on_member_join(member):
         # If verify channel exists and has no recent active panel, mention user there
         if verify_chan and verify_chan.permissions_for(member.guild.me).send_messages:
             try:
-                role_name = target_role.name if target_role else "Verified"
                 v_embed = discord.Embed(
                     title=f"🔒 Verification Required • {member.display_name}",
-                    description=f"Welcome {member.mention}! Please click **`🛡️ Verify First`** below to receive the **@{role_name}** role and start chatting.",
+                    description=f"Welcome {member.mention}! Please click **`🛡️ Verify First`** below to receive the {roles_text} role(s) and start chatting.",
                     color=discord.Color.green()
                 )
                 await verify_chan.send(content=f"{member.mention}", embed=v_embed, view=VerifyButtonView())
@@ -20586,8 +20585,73 @@ async def on_raw_reaction_add(payload):
 # ==============================================
 # 🛡️ SERVER VERIFICATION SYSTEM & PERSISTENT VIEW
 # ==============================================
-def build_verify_panel_embed(guild, role=None):
-    role_name = role.name if role else "Verified Member"
+def get_guild_verify_roles(guild, settings=None):
+    """
+    Returns a list of discord.Role objects that should be granted upon verification.
+    Includes:
+    1. The primary configured verification role (or fallback Verified/Member).
+    2. Any extra configured roles in verify_role_ids list.
+    3. Any existing special server roles like '#nem' / 'nem'.
+    """
+    if not guild:
+        return []
+    if settings is None:
+        settings = get_guild_moderation_settings(guild)
+
+    target_roles = []
+    seen_ids = set()
+
+    # 1. Primary role
+    role_id = settings.get("verify_role_id")
+    if role_id:
+        try:
+            r = guild.get_role(int(role_id))
+            if r and r.id not in seen_ids:
+                target_roles.append(r)
+                seen_ids.add(r.id)
+        except Exception:
+            pass
+
+    # 2. Multi-roles list (if configured via verify_role_ids)
+    extra_ids = settings.get("verify_role_ids", [])
+    if isinstance(extra_ids, list):
+        for eid in extra_ids:
+            try:
+                r = guild.get_role(int(eid))
+                if r and r.id not in seen_ids:
+                    target_roles.append(r)
+                    seen_ids.add(r.id)
+            except Exception:
+                pass
+
+    # 3. Fallback: if no primary role found, search for 'verified' or 'member'
+    if not target_roles:
+        for r in guild.roles:
+            if r.name.lower() in ["verified", "member", "members"]:
+                target_roles.append(r)
+                seen_ids.add(r.id)
+                settings["verify_role_id"] = r.id
+                save_guild_moderation_settings(guild)
+                break
+
+    # 4. Check for '#nem' or 'nem' role present in server to always assign together
+    for r in guild.roles:
+        clean_name = r.name.strip().lower()
+        if clean_name in ["#nem", "nem"] and r.id not in seen_ids:
+            target_roles.append(r)
+            seen_ids.add(r.id)
+            break
+
+    return target_roles
+
+
+def build_verify_panel_embed(guild, roles=None):
+    if not roles:
+        roles = get_guild_verify_roles(guild)
+    if isinstance(roles, discord.Role):
+        roles = [roles]
+    role_mentions_str = " & ".join([f"**@{r.name}**" for r in roles]) if roles else "**@Verified**"
+
     embed = discord.Embed(
         title=f"🛡️ Server Verification • {guild.name}",
         description=(
@@ -20596,7 +20660,7 @@ def build_verify_panel_embed(guild, role=None):
             f"To keep this server secure against automated spam bots, alt raids, and phishing attacks, all members must verify.\n\n"
             f"### 📋 How to Verify:\n"
             f"1️⃣ Click the green **`🛡️ Verify First`** button below.\n"
-            f"2️⃣ You will instantly receive the **@{role_name}** role.\n"
+            f"2️⃣ You will instantly receive the {role_mentions_str} roles.\n"
             f"3️⃣ All channels and chat permissions will immediately unlock for you!\n\n"
             f"*Need help? Contact server moderators or admins.*"
         ),
@@ -20624,25 +20688,9 @@ class VerifyButtonView(discord.ui.View):
             return await interaction.response.send_message("❌ This action can only be used inside a server.", ephemeral=True)
 
         settings = get_guild_moderation_settings(guild)
-        role_id = settings.get("verify_role_id")
-        target_role = None
+        target_roles = get_guild_verify_roles(guild, settings)
 
-        if role_id:
-            try:
-                target_role = guild.get_role(int(role_id))
-            except Exception:
-                target_role = None
-
-        if target_role is None:
-            # Fallback: look for a role named "Verified" or "Member"
-            for r in guild.roles:
-                if r.name.lower() in ["verified", "member", "members"]:
-                    target_role = r
-                    settings["verify_role_id"] = r.id
-                    save_guild_moderation_settings(guild)
-                    break
-
-        if target_role is None:
+        if not target_roles:
             # Auto-create "Verified" role if bot has permissions
             if guild.me.guild_permissions.manage_roles:
                 try:
@@ -20653,6 +20701,7 @@ class VerifyButtonView(discord.ui.View):
                     )
                     settings["verify_role_id"] = target_role.id
                     save_guild_moderation_settings(guild)
+                    target_roles = [target_role]
                 except Exception as e:
                     return await interaction.response.send_message(
                         f"❌ Server verification role is not configured, and bot could not create one: `{e}`. Please ask a Server Admin to run `uwu setupverify @Role`.",
@@ -20670,46 +20719,52 @@ class VerifyButtonView(discord.ui.View):
             if not member:
                 return await interaction.response.send_message("❌ Could not locate your member profile in this server.", ephemeral=True)
 
-        # Check if already has the role
-        if target_role in member.roles:
+        # Check which roles need to be added
+        roles_to_add = [r for r in target_roles if r not in member.roles]
+
+        if not roles_to_add:
+            role_names = ", ".join([f"@{r.name}" for r in target_roles])
             return await interaction.response.send_message(
-                f"ℹ️ You are **already verified** in **{guild.name}**! You have the **@{target_role.name}** role and full access to chat.",
+                f"ℹ️ You are **already verified** in **{guild.name}**! You already hold {role_names} and have full access to chat.",
                 ephemeral=True
             )
 
-        # Check bot hierarchy
-        if guild.me.top_role.position <= target_role.position:
+        # Check bot hierarchy for all roles to add
+        unassignable = [r for r in roles_to_add if guild.me.top_role.position <= r.position]
+        if unassignable:
+            role_names = ", ".join([f"@{r.name}" for r in unassignable])
             return await interaction.response.send_message(
-                f"❌ **Role Hierarchy Error**: The bot's highest role is not high enough to grant **@{target_role.name}**.\n"
-                f"Please ask a Server Admin to move the Bot's role **above** **@{target_role.name}** in Server Settings > Roles.",
+                f"❌ **Role Hierarchy Error**: The bot's highest role is not high enough to grant **{role_names}**.\n"
+                f"Please ask a Server Admin to move the Bot's role **above** **{role_names}** in Server Settings > Roles.",
                 ephemeral=True
             )
 
         try:
-            await member.add_roles(target_role, reason="[Verification System] Member clicked Verify First")
+            await member.add_roles(*roles_to_add, reason="[Verification System] Member clicked Verify First")
             settings["verification_enabled"] = True
             save_guild_moderation_settings(guild)
+
+            added_names = " & ".join([f"**@{r.name}**" for r in roles_to_add])
             await interaction.response.send_message(
                 f"🎉 **Verification Successful!**\n"
-                f"Welcome to **{guild.name}**, {member.mention}! You have been granted the **@{target_role.name}** role.\n"
+                f"Welcome to **{guild.name}**, {member.mention}! You have been granted the {added_names} role(s).\n"
                 f"You can now chat, view all server channels, and explore the community! 🚀",
                 ephemeral=True
             )
             # Log action
-            await log_moderation_action(guild, f"🛡️ **Member Verified:** {member.mention} (`{member.id}`) clicked Verify First and received **@{target_role.name}**.")
+            await log_moderation_action(guild, f"🛡️ **Member Verified:** {member.mention} (`{member.id}`) clicked Verify First and received {added_names}.")
 
             # Automatically delete/vanish the individual join verification prompt if this message was a welcome prompt
             try:
                 msg = interaction.message
                 if msg and msg.id != settings.get("verify_message_id"):
-                    # Delete the per-user prompt after a brief moment so the channel stays completely clean
                     await asyncio.sleep(1)
                     await msg.delete()
             except Exception:
                 pass
         except discord.Forbidden:
             await interaction.response.send_message(
-                f"❌ The bot lacks permission to assign **@{target_role.name}**. Please check bot permissions and role hierarchy.",
+                "❌ The bot lacks permission to assign the verification roles. Please check bot permissions and role hierarchy.",
                 ephemeral=True
             )
         except Exception as e:
@@ -25661,26 +25716,34 @@ async def setverifyrole_cmd(ctx, *, role_input: str = None):
         status = f"currently {current_role.mention}" if current_role else "currently **not set**"
         return await ctx.send(f"ℹ️ Verified role is {status}.\nUsage: `uwu setverifyrole @Role` or `uwu setverifyrole Member`.")
 
-    target_role = None
-    if ctx.message.role_mentions:
-        target_role = ctx.message.role_mentions[0]
-    else:
-        clean_input = role_input.strip()
-        if clean_input.isdigit():
-            target_role = ctx.guild.get_role(int(clean_input))
-        else:
-            for r in ctx.guild.roles:
-                if r.name.lower() == clean_input.lower():
-                    target_role = r
-                    break
-
-    if not target_role:
-        return await ctx.send(f"❌ Could not find a role matching `{role_input}`.")
-
     settings = get_guild_moderation_settings(ctx.guild)
-    settings["verify_role_id"] = target_role.id
+    roles_input_list = ctx.message.role_mentions
+    target_roles = []
+    if roles_input_list:
+        target_roles = roles_input_list
+    else:
+        # Split by comma or spaces to allow multiple roles (e.g. `uwu setverifyrole @Verified, #nem`)
+        tokens = [t.strip() for t in role_input.replace(",", " ").split() if t.strip()]
+        for tok in tokens:
+            r_obj = None
+            if tok.isdigit():
+                r_obj = ctx.guild.get_role(int(tok))
+            else:
+                for r in ctx.guild.roles:
+                    if r.name.lower() == tok.lower():
+                        r_obj = r
+                        break
+            if r_obj and r_obj not in target_roles:
+                target_roles.append(r_obj)
+
+    if not target_roles:
+        return await ctx.send(f"❌ Could not find roles matching `{role_input}`.")
+
+    settings["verify_role_id"] = target_roles[0].id
+    settings["verify_role_ids"] = [r.id for r in target_roles]
     save_guild_moderation_settings(ctx.guild)
-    await ctx.send(f"✅ **Verification role set to {target_role.mention}!** Users who click Verify First will receive this role.")
+    roles_str = ", ".join([r.mention for r in target_roles])
+    await ctx.send(f"✅ **Verification role(s) set to {roles_str}!** Users who click Verify First will receive all of these roles.")
 
 
 @bot.command(name="toggleverify", aliases=["enableverify", "disableverify"])
@@ -25716,24 +25779,25 @@ async def verifystatus_cmd(ctx):
 
     settings = get_guild_moderation_settings(ctx.guild)
     enabled = settings.get("verification_enabled", False)
-    role_id = settings.get("verify_role_id")
+    target_roles = get_guild_verify_roles(ctx.guild, settings)
     chan_id = settings.get("verify_channel_id")
-    role = ctx.guild.get_role(int(role_id)) if role_id else None
     chan = ctx.guild.get_channel(chan_id) if chan_id else None
+
+    roles_str = ", ".join([r.mention for r in target_roles]) if target_roles else "*Not configured*"
 
     embed = discord.Embed(
         title=f"🛡️ Server Verification Gate • {ctx.guild.name}",
         color=discord.Color.green() if enabled else discord.Color.greyple()
     )
     embed.add_field(name="🔒 Status", value="🟢 **ACTIVE**" if enabled else "🔴 **DISABLED**", inline=True)
-    embed.add_field(name="🎖️ Verified Role", value=role.mention if role else "*Not configured*", inline=True)
+    embed.add_field(name="🎖️ Verified Role(s)", value=roles_str, inline=True)
     embed.add_field(name="📍 Verification Channel", value=chan.mention if chan else "*Not configured*", inline=True)
     embed.add_field(
         name="📖 Configuration Commands",
         value=(
             "• `uwu setupverify @Role #channel` — Full automatic setup\n"
             "• `uwu verifypanel [#channel]` — Send interactive button card\n"
-            "• `uwu setverifyrole @Role` — Change verified role\n"
+            "• `uwu setverifyrole @Role1 @Role2` — Change verified roles\n"
             "• `uwu toggleverify [on/off]` — Enable/disable verification gate"
         ),
         inline=False
@@ -25748,34 +25812,26 @@ async def verify_cmd(ctx):
         return await ctx.send("❌ This command can only be used inside a server.")
 
     settings = get_guild_moderation_settings(ctx.guild)
-    role_id = settings.get("verify_role_id")
-    target_role = None
+    target_roles = get_guild_verify_roles(ctx.guild, settings)
 
-    if role_id:
-        try:
-            target_role = ctx.guild.get_role(int(role_id))
-        except Exception:
-            target_role = None
-
-    if target_role is None:
-        for r in ctx.guild.roles:
-            if r.name.lower() in ["verified", "member", "members"]:
-                target_role = r
-                break
-
-    if target_role is None:
+    if not target_roles:
         return await ctx.send("❌ Server verification role is not configured yet. Server Admins can run `uwu setupverify @Role`.")
 
-    if target_role in ctx.author.roles:
-        return await ctx.send(f"ℹ️ {ctx.author.mention}, you are **already verified** with the **@{target_role.name}** role!")
+    roles_to_add = [r for r in target_roles if r not in ctx.author.roles]
+    if not roles_to_add:
+        roles_str = ", ".join([f"@{r.name}" for r in target_roles])
+        return await ctx.send(f"ℹ️ {ctx.author.mention}, you are **already verified** with {roles_str}!")
 
-    if ctx.guild.me.top_role.position <= target_role.position:
-        return await ctx.send(f"❌ Bot role hierarchy error: The bot cannot grant **@{target_role.name}** because the bot's role is not high enough.")
+    unassignable = [r for r in roles_to_add if ctx.guild.me.top_role.position <= r.position]
+    if unassignable:
+        roles_str = ", ".join([f"@{r.name}" for r in unassignable])
+        return await ctx.send(f"❌ Bot role hierarchy error: The bot cannot grant **{roles_str}** because the bot's role is not high enough.")
 
     try:
-        await ctx.author.add_roles(target_role, reason="[Verification System] Member used uwu verify command")
-        await ctx.send(f"🎉 **Verification Successful!** Welcome {ctx.author.mention}, you have received the **@{target_role.name}** role and can now chat freely! 🚀")
-        await log_moderation_action(ctx.guild, f"🛡️ **Member Verified:** {ctx.author.mention} (`{ctx.author.id}`) verified via command and received **@{target_role.name}**.")
+        await ctx.author.add_roles(*roles_to_add, reason="[Verification System] Member used uwu verify command")
+        added_names = " & ".join([f"**@{r.name}**" for r in roles_to_add])
+        await ctx.send(f"🎉 **Verification Successful!** Welcome {ctx.author.mention}, you have received {added_names} and can now chat freely! 🚀")
+        await log_moderation_action(ctx.guild, f"🛡️ **Member Verified:** {ctx.author.mention} (`{ctx.author.id}`) verified via command and received {added_names}.")
     except discord.Forbidden:
         await ctx.send("❌ Bot lacks permission to assign roles. Please ask a Server Admin.")
     except Exception as e:
