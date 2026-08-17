@@ -4,7 +4,6 @@ firebase-admin
 google-cloud-firestore
 requests
 aiohttp
-python-dotenv
 pytest
 yt-dlp
 spotipy

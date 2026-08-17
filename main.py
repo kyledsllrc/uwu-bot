@@ -31,11 +31,6 @@ import urllib.parse
 import urllib.request
 import firebase_admin
 from firebase_admin import credentials, db
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 try:
     import wavelink
