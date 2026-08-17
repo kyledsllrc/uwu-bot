@@ -21,6 +21,28 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
 import discord
 from discord.ext import commands, tasks
 import random, json, time, os, asyncio, socket, uuid, re, traceback, hashlib, base64
+
+# Automatically load .env file into os.environ if present (pure Python standard library, 0 dependencies)
+def _load_local_env():
+    env_paths = [".env", "/home/container/.env"]
+    for p in env_paths:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+            except Exception as e:
+                print(f"Notice: error reading {p}: {e}")
+
+_load_local_env()
 import aiohttp
 from html import unescape
 import social_utils
