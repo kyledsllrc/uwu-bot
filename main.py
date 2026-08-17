@@ -20715,24 +20715,23 @@ async def on_ready():
     except Exception as exc:
         print(f"⚠️ Verification view registration notice: {exc}")
 
-    # ✅ Connect to Lavalink pool inside event loop
-    nodes = []
-    for cfg in LAVALINK_NODE_CONFIGS:
-        try:
-            node = wavelink.Node(**cfg)
-            nodes.append(node)
-        except Exception as exc:
-            print(f"⚠️ Failed to create Lavalink node {cfg.get('uri')}: {exc}")
+    # ✅ Connect to Lavalink pool inside event loop (only if wavelink is available and configured)
+    if wavelink and hasattr(wavelink, "Node") and hasattr(wavelink, "Pool"):
+        nodes = []
+        for cfg in LAVALINK_NODE_CONFIGS:
+            try:
+                node = wavelink.Node(**cfg)
+                nodes.append(node)
+            except Exception:
+                pass
 
-    if nodes:
-        try:
-            await wavelink.Pool.connect(nodes=nodes, client=bot)
-            print(f"✅ Lavalink: {len(nodes)} nodes loaded — Auto-Switch: ON! 🎶")
-        except Exception as exc:
-            print(f"⚠️ Lavalink Pool connection warning: {exc}")
-    else:
-        print("⚠️ No Lavalink nodes configured.")
-
+        if nodes:
+            try:
+                await wavelink.Pool.connect(nodes=nodes, client=bot)
+                print(f"✅ Lavalink: {len(nodes)} nodes loaded — Auto-Switch: ON! 🎶")
+            except Exception as exc:
+                print(f"ℹ️ Lavalink optional pool notice: {exc}")
+    
     # ✅ YOUR EXISTING CODE — KEEP ALL OF THIS BELOW!
     print(f"✅ BOT ONLINE — LOGGED IN AS: {bot.user}")
     print(f"✅ CURRENT PREFIX: '{CURRENT_PREFIX}'")
@@ -20742,9 +20741,15 @@ async def on_ready():
         print("✅ UNCRYPTO MARKET LOOP ACTIVE")
     # Initialize 24/7 Voice Watchdog
     try:
-        store = get_voice_247_store()
+        raw_store = get_voice_247_store()
+        store = raw_store if isinstance(raw_store, dict) else {}
         for gid_str, info in store.items():
-            if info.get("enabled"):
+            if isinstance(info, dict) and info.get("enabled"):
+                try:
+                    MODE_247_GUILDS.add(int(gid_str))
+                except Exception:
+                    pass
+            elif isinstance(info, (int, bool)) and info:
                 try:
                     MODE_247_GUILDS.add(int(gid_str))
                 except Exception:
@@ -20753,7 +20758,7 @@ async def on_ready():
             voice_247_watchdog.start()
             print("✅ 24/7 VOICE WATCHDOG LOOP ACTIVE")
     except Exception as exc:
-        print(f"⚠️ Failed to init 24/7 voice watchdog: {exc}")
+        print(f"⚠️ 24/7 voice watchdog notice: {exc}")
 
     for guild in bot.guilds:
         try:
