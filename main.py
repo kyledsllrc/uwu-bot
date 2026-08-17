@@ -21469,15 +21469,28 @@ async def paytax(ctx):
             f"Total balance: `{format_coins(total_balance)}` uwuncy (required: `{format_coins(WEALTH_TAX_AMOUNT)}`)."
         )
 
-    # Deduct 10q: prioritize wallet first, then bank
+    # Deduct 10q: prioritize wallet first, then ATM vault accounts, then bank
     tax_to_deduct = WEALTH_TAX_AMOUNT
     current_wallet = int(user.get("wallet", 0))
-    current_bank = int(user.get("bank", 0))
 
     from_wallet = min(current_wallet, tax_to_deduct)
     user["wallet"] = max(0, current_wallet - from_wallet)
     remainder = tax_to_deduct - from_wallet
+
+    # If wallet doesn't have enough 10q, deduct from ATM accounts
     if remainder > 0:
+        atm_accounts = user.get("atm_accounts", {})
+        for slot_key in ["1", "2", "3", "4", "5"]:
+            if slot_key in atm_accounts and remainder > 0:
+                slot_bal = int(atm_accounts[slot_key].get("balance", 0))
+                if slot_bal > 0:
+                    from_atm = min(slot_bal, remainder)
+                    atm_accounts[slot_key]["balance"] = max(0, slot_bal - from_atm)
+                    remainder -= from_atm
+
+    # Fallback to bank if still remaining
+    if remainder > 0:
+        current_bank = int(user.get("bank", 0))
         user["bank"] = max(0, current_bank - remainder)
 
     user["last_tax_paid"] = now
