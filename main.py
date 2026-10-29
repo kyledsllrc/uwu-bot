@@ -20,7 +20,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
 # ==============================================
 import discord
 from discord.ext import commands, tasks
-import random, json, time, os, asyncio, socket, uuid, re, traceback, hashlib, base64
+import random, json, time, os, asyncio, socket, uuid, re, traceback, hashlib
 
 # Automatically load .env file into os.environ if present (pure Python standard library, 0 dependencies)
 def _load_local_env():
@@ -4607,20 +4607,12 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
     if cached_ans:
         return format_as_discord_header(cached_ans)
 
-    # Collect all available API keys with built-in active fallback key
+    # Collect configured server-side Gemini API keys.
     candidate_keys = []
-    for env_k in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY", "GEMINI_KEY", "VITE_GEMINI_API_KEY"]:
+    for env_k in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY", "GEMINI_KEY"]:
         v = os.environ.get(env_k)
         if v and v.strip() and v not in candidate_keys:
             candidate_keys.append(v.strip())
-
-    # Ensure reliable active fallback Gemini key is decoded at runtime
-    try:
-        fallback_gemini_key = base64.b64decode("QVEuQWI4Uk42S3I1NzdlNTZxRHc5TEhKQTB0ZnJneVh1UHRyMmN4aGJWZzdQTGdobmplcXc=").decode("utf-8")
-        if fallback_gemini_key not in candidate_keys:
-            candidate_keys.append(fallback_gemini_key)
-    except Exception:
-        pass
 
     # Tuned UwU Bot System Prompt: authentic, empathetic, street-smart Discord companion personality
     system_prompt = (
@@ -4639,64 +4631,16 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
         "7. PLAIN TEXT ONLY: No prefixes like 'Response:' or 'UwU Bot:'."
     )
 
-    # 2. Primary Top-Tier: Groq High-Speed LPU AI Engine
-    groq_api_keys = []
-    for g_env in ["GROQ_API_KEY", "GROQ_KEY"]:
-        gv = os.environ.get(g_env)
-        if gv and gv.strip() and gv not in groq_api_keys:
-            groq_api_keys.append(gv.strip())
-    try:
-        embedded_groq = "".join(chr(b ^ 0x5A) for b in [61, 41, 49, 5, 110, 32, 99, 105, 111, 105, 105, 20, 25, 27, 45, 61, 9, 28, 106, 61, 104, 10, 22, 31, 13, 29, 62, 35, 56, 105, 28, 3, 14, 61, 22, 41, 21, 111, 63, 23, 98, 30, 62, 43, 108, 9, 62, 51, 9, 40, 52, 25, 17, 105, 51, 28])
-        if embedded_groq not in groq_api_keys:
-            groq_api_keys.append(embedded_groq)
-    except Exception:
-        pass
-
-    groq_models = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "gemma2-9b-it",
-        "mixtral-8x7b-32768"
-    ]
-
-    for g_key in groq_api_keys:
-        for g_model in groq_models:
-            groq_payload = {
-                "model": g_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"User {author_name} says: {clean_query}"}
-                ],
-                "max_tokens": 100,
-                "temperature": 0.7
-            }
-            g_headers = {
-                "Authorization": f"Bearer {g_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            }
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4.0)) as session:
-                    async with session.post("https://api.groq.com/openai/v1/chat/completions", json=groq_payload, headers=g_headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            choices = data.get("choices", [])
-                            if choices and "message" in choices[0] and "content" in choices[0]["message"]:
-                                text_ans = choices[0]["message"]["content"].strip()
-                                if text_ans:
-                                    store_cached_rant_reply(clean_query, text_ans)
-                                    return format_as_discord_header(text_ans)
-            except Exception:
-                continue
-
-    # 3. Secondary Top-Tier Fallback: Google Gemini Next-Gen Multi-Model & Multi-Key rotation (keeps bot always online)
+    # 2. Primary provider: Google Gemini.
     gemini_models_to_try = [
+        os.environ.get("GEMINI_MODEL", "").strip(),
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite-preview",
         "gemini-3.5-flash",
         "gemini-3-flash-preview",
         "gemini-flash-latest"
     ]
+    gemini_models_to_try = list(dict.fromkeys(model for model in gemini_models_to_try if model))
     gemini_payload = {
         "contents": [
             {
@@ -4743,8 +4687,52 @@ async def generate_ai_rant_reply(query: str, author_name: str = "Friend", author
             except Exception:
                 continue
 
-    # 4. Tertiary Fallback: AIMLAPI Engine
-    aiml_api_key = os.environ.get("AIMLAPI_KEY") or "d444062c07add1f1a655fd4c0afb0f37"
+    # 3. Fallback provider: Groq, when configured.
+    groq_api_keys = []
+    for g_env in ["GROQ_API_KEY", "GROQ_KEY"]:
+        gv = os.environ.get(g_env)
+        if gv and gv.strip() and gv not in groq_api_keys:
+            groq_api_keys.append(gv.strip())
+
+    groq_models = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768"
+    ]
+
+    for g_key in groq_api_keys:
+        for g_model in groq_models:
+            groq_payload = {
+                "model": g_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"User {author_name} says: {clean_query}"}
+                ],
+                "max_tokens": 100,
+                "temperature": 0.7
+            }
+            g_headers = {
+                "Authorization": f"Bearer {g_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            }
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4.0)) as session:
+                    async with session.post("https://api.groq.com/openai/v1/chat/completions", json=groq_payload, headers=g_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            choices = data.get("choices", [])
+                            if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+                                text_ans = choices[0]["message"]["content"].strip()
+                                if text_ans:
+                                    store_cached_rant_reply(clean_query, text_ans)
+                                    return format_as_discord_header(text_ans)
+            except Exception:
+                continue
+
+    # 4. Fallback provider: AIMLAPI, when configured.
+    aiml_api_key = os.environ.get("AIMLAPI_KEY")
     if aiml_api_key:
         aiml_models = [
             "openai/gpt-4o-mini",
