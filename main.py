@@ -4244,7 +4244,7 @@ async def revokemod_cmd(ctx, target: Union[discord.Member, discord.Role] = None)
 # ==============================================
 RANT_USER_COOLDOWN = {}
 RANT_RESPONSE_CACHE = {}  # sha256_key -> {"response": str, "timestamp": float}
-RANT_COOLDOWN_SECONDS = 30.0  # 30-60 sec cooldown per user to stretch free quota & prevent spam
+RANT_COOLDOWN_SECONDS = 0.0  # No per-user cooldown on rant requests
 RANT_CACHE_TTL_SECONDS = 7200.0  # 2 hours cache lifetime for repeated similar rants
 
 def get_rant_user_cooldown_remaining(user_id: int) -> float:
@@ -4834,13 +4834,14 @@ async def rant_cmd(ctx, action: str = None, *, extra: str = None):
         )
         return await ctx.send(embed=embed)
 
-    # 30–60 second cooldown per user to stretch free quota & prevent spam
-    cooldown_rem = get_rant_user_cooldown_remaining(ctx.author.id)
-    if cooldown_rem > 0:
-        return await ctx.reply(
-            format_as_discord_header(f"Huminahon ka muna, {ctx.author.display_name}. Wait ka ng {int(cooldown_rem)}s bago mag-rant ulit."),
-            mention_author=True
-        )
+    # Rant cooldown disabled; requests are allowed immediately.
+    if RANT_COOLDOWN_SECONDS > 0:
+        cooldown_rem = get_rant_user_cooldown_remaining(ctx.author.id)
+        if cooldown_rem > 0:
+            return await ctx.reply(
+                format_as_discord_header(f"Huminahon ka muna, {ctx.author.display_name}. Wait ka ng {int(cooldown_rem)}s bago mag-rant ulit."),
+                mention_author=True
+            )
 
     record_rant_user_activity(ctx.author.id)
 
@@ -20530,13 +20531,14 @@ async def on_message(message):
                     # Check if command is NOT an existing registered bot command
                     if cmd_word not in bot.all_commands:
                         if len(after_pref) >= 2:
-                            cooldown_rem = get_rant_user_cooldown_remaining(message.author.id)
-                            if cooldown_rem > 0:
-                                await message.reply(
-                                    format_as_discord_header(f"Huminahon ka muna, {message.author.display_name}. Wait ka ng {int(cooldown_rem)}s bago mag-rant ulit."),
-                                    mention_author=True
-                                )
-                                return
+                            if RANT_COOLDOWN_SECONDS > 0:
+                                cooldown_rem = get_rant_user_cooldown_remaining(message.author.id)
+                                if cooldown_rem > 0:
+                                    await message.reply(
+                                        format_as_discord_header(f"Huminahon ka muna, {message.author.display_name}. Wait ka ng {int(cooldown_rem)}s bago mag-rant ulit."),
+                                        mention_author=True
+                                    )
+                                    return
                             record_rant_user_activity(message.author.id)
                             try:
                                 async with message.channel.typing():
